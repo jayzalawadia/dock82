@@ -51,14 +51,14 @@
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
         "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.stripe.com https://checkout.stripe.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.stripe.com https://checkout.stripe.com https://phstdzlniugqbxtfgktb.supabase.co; frame-src https://js.stripe.com https://checkout.stripe.com;"
+        "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.stripe.com https://checkout.stripe.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://dock82-backend-prod-env.eba-tpskh5bd.us-east-1.elasticbeanstalk.com https://api.stripe.com https://checkout.stripe.com https://phstdzlniugqbxtfgktb.supabase.co; frame-src https://js.stripe.com https://checkout.stripe.com;"
       }
     }
   ],
 
   "env": {
     "REACT_APP_DEBUG_MODE": "false",
-    "REACT_APP_API_URL": "http://dock82-backend-prod-env.eba-tpskh5bd.us-east-1.elasticbeanstalk.com",
+    "REACT_APP_API_URL": "https://dock82-backend-prod-env.eba-tpskh5bd.us-east-1.elasticbeanstalk.com",
     "REACT_APP_SUPABASE_URL": "https://phstdzlniugqbxtfgktb.supabase.co",
     "REACT_APP_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBoc3RkemxuaXVncWJ4dGZna3RiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ5NTM0MzUsImV4cCI6MjA3MDUyOTQzNX0.u5A8Loh-pk9FCU68Rs1SWE8qBkxx5LXMhK-eM_EtNwM",
     "REACT_APP_STRIPE_PUBLISHABLE_KEY": "pk_test_51SG5p53j9XCjmWOGSpK1ex75CbbmwN01r6RbOZ2QKgoWZ7Q6K1gEu12OgUhgSb2ur6LoBJSOA7V2K9zS0WhbPwJk00l16UUppK",
