@@ -38,8 +38,58 @@ console.log('🔑 SUPABASE_URL:', supabaseUrl);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Determine allowed origins for CORS
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'https://localhost:3000',
+  'https://dock82.com',
+  'https://www.dock82.com',
+  'https://api.dock82.com'
+];
+
+const envAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = Array.from(new Set([...envAllowedOrigins, ...defaultAllowedOrigins]));
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    console.warn(`🚫 CORS blocked origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature'],
+  credentials: true,
+  optionsSuccessStatus: 204
+};
+
+// Apply headers early so even error responses include CORS allowances
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (allowedOrigins.includes(origin) || allowedOrigins.includes('*'))) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin && allowedOrigins.includes('*')) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (!origin && allowedOrigins.length > 0) {
+    res.header('Access-Control-Allow-Origin', allowedOrigins[0]);
+  }
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Stripe-Signature');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Health check
