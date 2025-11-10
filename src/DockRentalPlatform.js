@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Calendar, MapPin, Anchor, Clock, DollarSign, User, Settings, Plus, Edit, Trash2, Check, X, Filter, Search, CreditCard, Lock, Eye, EyeOff } from 'lucide-react';
 import { loadStripe } from '@stripe/stripe-js';
 import { Elements } from '@stripe/react-stripe-js';
 import { supabase } from './supabase';
 import PaymentPage from './PaymentPage';
 import { uploadUserDocument, uploadSlipImage } from './storage-utils';
+import { Dock82Logo } from './components/Dock82Logo';
 
 // Store clientSecret in DockRentalPlatform state to pass to Elements
 let globalClientSecret = null;
@@ -114,6 +115,20 @@ const DockRentalPlatform = () => {
     userType: 'renter'
   });
   const [userBookings, setUserBookings] = useState([]);
+  const updateUserBookingsFromList = useCallback((bookingList = []) => {
+    if (!currentUser) {
+      setUserBookings([]);
+      return;
+    }
+
+    const filtered = bookingList.filter(booking =>
+      (booking.user_id && booking.user_id === currentUser.id) ||
+      (!booking.user_id && booking.guestEmail === currentUser.email)
+    );
+
+    setUserBookings(filtered);
+  }, [currentUser]);
+
   const [editingImage, setEditingImage] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -575,18 +590,8 @@ const DockRentalPlatform = () => {
 
   // Update userBookings whenever bookings or currentUser changes
   useEffect(() => {
-    if (currentUser && bookings.length > 0) {
-      // Filter bookings by user_id (with fallback to email for backward compatibility)
-      const filteredBookings = bookings.filter(booking => 
-        (booking.user_id && booking.user_id === currentUser.id) || 
-        (!booking.user_id && booking.guestEmail === currentUser.email)
-      );
-      setUserBookings(filteredBookings);
-    } else if (!currentUser) {
-      // Clear userBookings when user logs out
-      setUserBookings([]);
-    }
-  }, [bookings, currentUser]);
+    updateUserBookingsFromList(bookings);
+  }, [bookings, updateUserBookingsFromList]);
 
   // Re-transform bookings when slips are loaded to add slipName
   useEffect(() => {
@@ -3423,17 +3428,27 @@ const DockRentalPlatform = () => {
   }
 
 
-  
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white shadow-sm border-b">
+      <header className="bg-white shadow-sm border-b sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-4">
           <div className="flex justify-between items-center">
-            <div className="flex items-center">
-              <div className="w-8 h-8 text-blue-600 mr-3 text-2xl">🌊🐢</div>
-              <h1 className="text-2xl font-bold text-gray-900">Jose's Hideaway Dock Association - DOCK 82</h1>
-            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (!currentUser) {
+                  setShowLoginModal(true);
+                  resetAuthFlow();
+                } else {
+                  setCurrentView('browse');
+                }
+              }}
+              className="flex items-center bg-transparent border-none p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 rounded-md"
+            >
+              <Dock82Logo width={52} height={52} includeText variant="full" />
+            </button>
             <nav className="flex items-center space-x-6">
               <button
                 onClick={() => {

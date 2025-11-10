@@ -54,9 +54,24 @@ const envAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
 
 const allowedOrigins = Array.from(new Set([...envAllowedOrigins, ...defaultAllowedOrigins]));
 
+const isLocalhostOrigin = (origin = '') => {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+};
+
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*') ||
+      isLocalhostOrigin(origin)
+    ) {
       return callback(null, true);
     }
     console.warn(`🚫 CORS blocked origin: ${origin}`);
@@ -71,7 +86,12 @@ const corsOptions = {
 // Apply headers early so even error responses include CORS allowances
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && (allowedOrigins.includes(origin) || allowedOrigins.includes('*'))) {
+  if (
+    origin &&
+    (allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*') ||
+      isLocalhostOrigin(origin))
+  ) {
     res.header('Access-Control-Allow-Origin', origin);
   } else if (!origin && allowedOrigins.includes('*')) {
     res.header('Access-Control-Allow-Origin', '*');
