@@ -12,7 +12,7 @@ export const uploadSlipImage = async (file, slipId) => {
   try {
     const fileExt = file.name.split('.').pop();
     const fileName = `${slipId}-${Date.now()}.${fileExt}`;
-    const filePath = `slip-images/${fileName}`;
+    const filePath = `${slipId}/${fileName}`;
 
     const { data, error } = await supabase.storage
       .from('slip-images')

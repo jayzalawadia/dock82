@@ -1898,6 +1898,165 @@ app.patch('/api/slips/:id', async (req, res) => {
   }
 });
 
+app.post('/api/add-new-slips', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({
+        error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required'
+      });
+    }
+
+    const defaultSlips = [
+      {
+        name: 'Slip 13',
+        max_boat_length: 26,
+        width: 10,
+        depth: 6,
+        price_per_night: 60,
+        amenities: ['Water', 'Electric (120V)'],
+        description: 'Max Length: 26ft | Width: 10ft | Depth: 6ft\nWater and 120V Electric',
+        dock_etiquette:
+          '• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required',
+        available: false,
+        status: 'available',
+        images: [],
+        location_data: {
+          section: 'D',
+          position: 13,
+          coordinates: { lat: 26.3613, lng: -80.0836 }
+        }
+      },
+      {
+        name: 'Slip 14',
+        max_boat_length: 26,
+        width: 10,
+        depth: 6,
+        price_per_night: 60,
+        amenities: ['Water', 'Electric (120V)'],
+        description: 'Max Length: 26ft | Width: 10ft | Depth: 6ft\nWater and 120V Electric',
+        dock_etiquette:
+          '• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required',
+        available: false,
+        status: 'available',
+        images: [],
+        location_data: {
+          section: 'D',
+          position: 14,
+          coordinates: { lat: 26.3614, lng: -80.0833 }
+        }
+      }
+    ];
+
+    const { slip, slips, generateDefault, useDefaults } = req.body || {};
+    let slipsToInsert;
+
+    const parseFloatOrNull = (value) => {
+      if (value === null || value === undefined || value === '') return null;
+      const parsed = parseFloat(value);
+      return Number.isNaN(parsed) ? null : parsed;
+    };
+
+    if (generateDefault || useDefaults || (!slip && !Array.isArray(slips))) {
+      slipsToInsert = defaultSlips;
+    } else {
+      const inputArray = Array.isArray(slips) ? slips : [slip];
+
+      slipsToInsert = inputArray.map((input, index) => {
+        if (!input || typeof input !== 'object') {
+          throw new Error(`Invalid slip payload at index ${index}`);
+        }
+
+        if (!input.name || typeof input.name !== 'string') {
+          throw new Error(`Slip name is required at index ${index}`);
+        }
+
+        if (input.price_per_night === undefined && input.pricePerNight === undefined) {
+          throw new Error(`Price per night is required for slip "${input.name}"`);
+        }
+
+        const amenities = Array.isArray(input.amenities)
+          ? input.amenities
+          : typeof input.amenities === 'string'
+            ? input.amenities.split(',').map((item) => item.trim()).filter(Boolean)
+            : [];
+
+        let locationData = input.location_data || input.locationData || null;
+        const createdBy = input.created_by ?? input.createdBy ?? null;
+        if (createdBy) {
+          if (locationData && typeof locationData === 'object' && !Array.isArray(locationData)) {
+            locationData = { ...locationData, created_by: createdBy };
+          } else {
+            locationData = { created_by: createdBy };
+          }
+        }
+
+        const pricePerNight = parseFloatOrNull(input.price_per_night ?? input.pricePerNight);
+        if (pricePerNight === null) {
+          throw new Error(`Price per night is required for slip "${input.name}"`);
+        }
+
+        const maxBoatLength = parseFloatOrNull(input.max_boat_length ?? input.maxBoatLength);
+        if (maxBoatLength === null) {
+          throw new Error(`Max boat length is required for slip "${input.name}"`);
+        }
+
+        const widthValue = parseFloatOrNull(input.width);
+        if (widthValue === null || widthValue <= 0) {
+          throw new Error(`Slip width is required for slip "${input.name}"`);
+        }
+
+        const depthValue = parseFloatOrNull(input.depth);
+        if (depthValue === null || depthValue <= 0) {
+          throw new Error(`Slip depth is required for slip "${input.name}"`);
+        }
+
+        const sanitized = {
+          name: input.name.trim(),
+          description: input.description ?? input.description?.trim?.() ?? null,
+          price_per_night: pricePerNight,
+          max_boat_length: maxBoatLength,
+          width: widthValue,
+          depth: depthValue,
+          amenities,
+          dock_etiquette: input.dock_etiquette ?? input.dockEtiquette ?? null,
+          available: typeof input.available === 'boolean' ? input.available : false,
+          status: (input.status || 'available').toLowerCase(),
+          images: Array.isArray(input.images) ? input.images : [],
+          location_data: locationData && typeof locationData === 'object' ? locationData : null,
+          maintenance_notes: input.maintenance_notes ?? input.maintenanceNotes ?? null,
+          seasonal_pricing: input.seasonal_pricing ?? input.seasonalPricing ?? null
+        };
+
+        return sanitized;
+      });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('slips')
+      .upsert(slipsToInsert, { onConflict: 'name' })
+      .select('*');
+
+    if (error) {
+      console.error('Error upserting slip(s):', error);
+      return res.status(500).json({
+        error: 'Failed to add or update slips',
+        details: error.message
+      });
+    }
+
+    const message = (generateDefault || useDefaults || (!slip && !Array.isArray(slips)))
+      ? 'Slips 13 & 14 added or updated successfully.'
+      : data.length > 1
+        ? `${data.length} slips added successfully.`
+        : `${data[0]?.name || 'Slip'} added successfully.`;
+
+    res.json({ success: true, message, slips: data });
+  } catch (error) {
+    console.error('Error in /api/add-new-slips:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 app.post('/api/notifications', async (req, res) => {
   try {
     if (!supabaseAdmin) {

@@ -4,7 +4,7 @@ import { loadStripe } from '@stripe/stripe-js';
 import { Elements } from '@stripe/react-stripe-js';
 import { supabase } from './supabase';
 import PaymentPage from './PaymentPage';
-import { uploadUserDocument, uploadSlipImage } from './storage-utils';
+import { uploadUserDocument, uploadSlipImage, validateFile } from './storage-utils';
 import { Dock82Logo } from './components/Dock82Logo';
 
 // Store clientSecret in DockRentalPlatform state to pass to Elements
@@ -186,8 +186,41 @@ const DockRentalPlatform = () => {
   const [editingImage, setEditingImage] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState('');
+  const [commonEtiquette, setCommonEtiquette] = useState('');
+  const [commonEtiquetteInitialized, setCommonEtiquetteInitialized] = useState(false);
+  const [etiquetteSaving, setEtiquetteSaving] = useState(false);
+  const [slips, setSlips] = useState([]);
+  const [allSlips, setAllSlips] = useState([]);
+  const [allBookings, setAllBookings] = useState([]);
   const [slipsLoading, setSlipsLoading] = useState(true);
   const [dataInitialized, setDataInitialized] = useState(false);
+  const [newSlipForm, setNewSlipForm] = useState({
+    name: '',
+    description: '',
+    pricePerNight: '',
+    maxBoatLength: '',
+    width: '',
+    depth: '',
+    amenities: '',
+    dockEtiquette: '',
+    locationSection: '',
+    locationPosition: '',
+    locationLat: '',
+    locationLng: '',
+    imageFile: null
+  });
+  const [newSlipFormErrors, setNewSlipFormErrors] = useState({});
+  const [newSlipSubmitting, setNewSlipSubmitting] = useState(false);
+  const [newSlipImagePreview, setNewSlipImagePreview] = useState(null);
+
+  useEffect(() => {
+    return () => {
+      if (newSlipImagePreview) {
+        URL.revokeObjectURL(newSlipImagePreview);
+      }
+    };
+  }, [newSlipImagePreview]);
   const [cancellationPolicy] = useState({
     homeowner: { fee: 0, description: "Free cancellation anytime" },
     renter: {
@@ -281,9 +314,35 @@ const DockRentalPlatform = () => {
     [notifications]
   );
 
-  const [slips, setSlips] = useState([]);
-  const [allSlips, setAllSlips] = useState([]);
-  const [allBookings, setAllBookings] = useState([]);
+  useEffect(() => {
+    if (commonEtiquetteInitialized) {
+      return;
+    }
+
+    if (!slips || slips.length === 0) {
+      return;
+    }
+
+    const trimmedRules = slips
+      .map((slip) => (slip.dockEtiquette || '').trim())
+      .filter((rule) => rule.length > 0);
+
+    if (trimmedRules.length === 0) {
+      setCommonEtiquette('');
+      setCommonEtiquetteInitialized(true);
+      return;
+    }
+
+    const uniqueRules = Array.from(new Set(trimmedRules));
+    if (uniqueRules.length === 1) {
+      setCommonEtiquette(uniqueRules[0]);
+    } else {
+      setCommonEtiquette('');
+    }
+
+    setCommonEtiquetteInitialized(true);
+  }, [slips, commonEtiquetteInitialized]);
+
   const currentUserType = currentUser ? normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role) : null;
   const canManageUserRoles = currentUserType === 'admin' || currentUserType === 'superadmin';
 
@@ -340,6 +399,9 @@ const DockRentalPlatform = () => {
       };
 
       const maxLength = slip.max_boat_length != null ? slip.max_boat_length : slip.max_length;
+      const status = (slip.status || '').toLowerCase();
+      const isAvailable =
+        typeof slip.available === 'boolean' ? slip.available : status !== 'inactive';
 
       return {
         id: slip.id,
@@ -351,11 +413,88 @@ const DockRentalPlatform = () => {
         amenities: Array.isArray(slip.amenities) ? slip.amenities : (slip.amenities ? [slip.amenities] : []),
         description: slip.description,
         dockEtiquette: slip.dock_etiquette,
-        available: typeof slip.available === 'boolean' ? slip.available : true,
+        available: isAvailable,
+        status,
         images
       };
     });
   };
+
+  const applySlipUpdate = (updatedSlip) => {
+    if (!updatedSlip) {
+      return;
+    }
+
+    setSlips((prevSlips) =>
+      prevSlips.map((slip) => (slip.id === updatedSlip.id ? { ...slip, ...updatedSlip } : slip))
+    );
+
+    setAllSlips((prevSlips) =>
+      prevSlips.map((slip) => (slip.id === updatedSlip.id ? { ...slip, ...updatedSlip } : slip))
+    );
+  };
+
+  const patchSlip = async (slipId, payload) => {
+    const response = await fetch(`${API_BASE_URL}/api/slips/${slipId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const errorMessage = data?.error || data?.details || 'Failed to update slip';
+      throw new Error(errorMessage);
+    }
+
+    if (data?.success && data?.slip) {
+      const [transformed] = transformSlipsData([data.slip]);
+      if (transformed) {
+        return transformed;
+      }
+    }
+
+    return null;
+  };
+
+  const refreshSlipsFromServer = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/slips`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch slips');
+      }
+      const slipsData = await response.json();
+      const transformed = transformSlipsData(slipsData.slips || []);
+      setSlips(transformed);
+      setAllSlips(transformed);
+      return transformed;
+    } catch (error) {
+      console.error('Error refreshing slips:', error);
+      throw error;
+    }
+  }, [API_BASE_URL]);
+
+  const addSlips = useCallback(async ({ slipPayload, generateDefault } = {}) => {
+    const payload = generateDefault ? { generateDefault: true } : { slip: slipPayload };
+
+    const response = await fetch(`${API_BASE_URL}/api/add-new-slips`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data?.success) {
+      const errorMessage = data?.error || data?.details || 'Failed to add slips';
+      throw new Error(errorMessage);
+    }
+
+    return data.slips || [];
+  }, [API_BASE_URL]);
 
   const transformBookingsData = (bookingArray = [], slipList = []) => {
     const referenceSlips = (slipList && slipList.length ? slipList : (allSlips.length ? allSlips : slips));
@@ -943,57 +1082,33 @@ const DockRentalPlatform = () => {
   };
 
   const handleSaveDescription = async () => {
-    if (editingSlip) {
-      try {
-        // Save to database
-        const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/slips`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'update-slip',
-            slipId: editingSlip.id,
-            slipData: {
-              name: editingSlip.name,
-              description: editingDescription,
-              price_per_night: editingSlip.price_per_night,
-              images: editingSlip.images
-            }
-          }),
-        });
-        
-        if (response.ok) {
-          const result = await response.json();
-          if (result.success) {
-            // Update local state
-            const updatedSlips = slips.map(slip => 
-              slip.id === editingSlip.id 
-                ? { ...slip, description: editingDescription }
-                : slip
-            );
-            setSlips(updatedSlips);
-            setEditingSlip(null);
-            setEditingDescription('');
+    if (!editingSlip) {
+      return;
+    }
+
+    try {
+      const updatedSlip = await patchSlip(editingSlip.id, { description: editingDescription });
+      applySlipUpdate(updatedSlip || { ...editingSlip, description: editingDescription });
             alert('✅ Slip description updated successfully!');
-          } else {
-            alert('❌ Failed to update slip: ' + result.error);
-          }
-        } else {
-          throw new Error('Failed to update slip');
-        }
+      handleCancelEdit();
       } catch (error) {
-        console.error('Error updating slip:', error);
-        alert('❌ Failed to update slip. Please try again.');
-      }
+      console.error('Error updating slip description:', error);
+      alert(`❌ Failed to update slip. ${error.message || 'Please try again.'}`);
     }
   };
 
   const handleCancelEdit = () => {
+    if (editingImage && typeof editingImage === 'string' && editingImage.startsWith('blob:')) {
+      URL.revokeObjectURL(editingImage);
+    }
+
     setEditingSlip(null);
     setEditingDescription('');
+    setEditingPrice('');
     setEditingImage('');
     setImageFile(null);
+    setImageUploadError('');
+    setIsUploading(false);
   };
 
   const handleEditPrice = (slip) => {
@@ -1002,49 +1117,124 @@ const DockRentalPlatform = () => {
   };
 
   const handleSavePrice = async () => {
-    if (editingSlip && editingPrice) {
-      try {
-        // Save to database
-        const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/slips`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'update-slip',
-            slipId: editingSlip.id,
-            slipData: {
-              name: editingSlip.name,
-              description: editingSlip.description,
-              price_per_night: parseFloat(editingPrice),
-              images: editingSlip.images
-            }
-          }),
-        });
-        
-        if (response.ok) {
-          const result = await response.json();
-          if (result.success) {
-            // Update local state
-            const updatedSlips = slips.map(slip => 
-              slip.id === editingSlip.id 
-                ? { ...slip, price_per_night: parseFloat(editingPrice) }
-                : slip
-            );
-            setSlips(updatedSlips);
-            setEditingSlip(null);
-            setEditingPrice('');
+    if (!editingSlip) {
+      return;
+    }
+
+    const parsedPrice = parseFloat(editingPrice);
+    if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
+      alert('Please enter a valid price.');
+      return;
+    }
+
+    try {
+      const updatedSlip = await patchSlip(editingSlip.id, { price_per_night: parsedPrice });
+      applySlipUpdate(updatedSlip || { ...editingSlip, price_per_night: parsedPrice });
             alert('✅ Slip price updated successfully!');
-          } else {
-            alert('❌ Failed to update slip: ' + result.error);
-          }
-        } else {
-          throw new Error('Failed to update slip');
-        }
-      } catch (error) {
-        console.error('Error updating slip:', error);
-        alert('❌ Failed to update slip. Please try again.');
+      handleCancelEdit();
+    } catch (error) {
+      console.error('Error updating slip price:', error);
+      alert(`❌ Failed to update slip. ${error.message || 'Please try again.'}`);
+    }
+  };
+
+  const handleStartImageEdit = (slip) => {
+    if (editingImage && typeof editingImage === 'string' && editingImage.startsWith('blob:')) {
+      URL.revokeObjectURL(editingImage);
+    }
+
+    const currentImage = Array.isArray(slip.images)
+      ? slip.images[0] || ''
+      : (typeof slip.images === 'string' ? slip.images : '');
+
+    setEditingSlip({ ...slip, editingType: 'image' });
+    setEditingImage(currentImage || '');
+    setImageFile(null);
+    setImageUploadError('');
+  };
+
+  const handleImageFileChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    const validation = validateFile(file, ['image/jpeg', 'image/png', 'image/webp'], 10);
+    if (!validation.valid) {
+      setImageUploadError(validation.error);
+      return;
+    }
+
+    if (editingImage && typeof editingImage === 'string' && editingImage.startsWith('blob:')) {
+      URL.revokeObjectURL(editingImage);
+    }
+
+    setImageUploadError('');
+    setImageFile(file);
+    setEditingImage(URL.createObjectURL(file));
+  };
+
+  const handleSaveImage = async () => {
+    if (!editingSlip) {
+      return;
+    }
+
+    if (!imageFile) {
+      setImageUploadError('Please choose an image to upload.');
+      return;
+    }
+
+    const validation = validateFile(imageFile, ['image/jpeg', 'image/png', 'image/webp'], 10);
+    if (!validation.valid) {
+      setImageUploadError(validation.error);
+      return;
+    }
+
+    setIsUploading(true);
+    setImageUploadError('');
+
+    try {
+      const uploadResult = await uploadSlipImage(imageFile, editingSlip.id);
+      if (!uploadResult?.success || !uploadResult.url) {
+        throw new Error(uploadResult?.error || 'Failed to upload image');
       }
+
+      const updatedSlip = await patchSlip(editingSlip.id, { images: [uploadResult.url] });
+      applySlipUpdate(updatedSlip || { ...editingSlip, images: [uploadResult.url] });
+
+      alert('✅ Slip image updated successfully!');
+      handleCancelEdit();
+      } catch (error) {
+      console.error('Error updating slip image:', error);
+      setImageUploadError(error.message || 'Failed to update slip image. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleSaveCommonEtiquette = async () => {
+    if (!slips.length) {
+      alert('No slips available to update.');
+      return;
+    }
+
+    setEtiquetteSaving(true);
+
+    try {
+      await Promise.all(
+        slips.map((slip) => patchSlip(slip.id, { dock_etiquette: commonEtiquette }))
+      );
+
+      setSlips((prev) => prev.map((slip) => ({ ...slip, dockEtiquette: commonEtiquette })));
+      setAllSlips((prev) => prev.map((slip) => ({ ...slip, dockEtiquette: commonEtiquette })));
+
+      alert('✅ Dock etiquette updated for all slips!');
+      setCommonEtiquetteInitialized(true);
+    } catch (error) {
+      console.error('Error updating dock etiquette:', error);
+      alert(`❌ Failed to update dock etiquette. ${error.message || 'Please try again.'}`);
+    } finally {
+      setEtiquetteSaving(false);
     }
   };
 
@@ -1066,7 +1256,7 @@ const DockRentalPlatform = () => {
         return;
       }
 
-      const result = await response.json();
+          const result = await response.json();
       const updated = result.booking;
       if (!updated) {
         return;
@@ -1129,10 +1319,10 @@ const DockRentalPlatform = () => {
       const result = await response.json();
       if (result.url) {
         window.open(result.url, '_blank', 'noopener');
-      } else {
+        } else {
         alert('Document URL not available.');
-      }
-    } catch (error) {
+        }
+      } catch (error) {
       console.error('Error fetching document:', error);
       alert('Failed to load document. Please try again.');
     }
@@ -1456,25 +1646,6 @@ const DockRentalPlatform = () => {
       const newBookingData = created.booking;
       console.log('Booking inserted successfully via API:', newBookingData);
 
-      // Update slip availability in database via backend API (bypasses RLS)
-      try {
-        const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
-        const updateResponse = await fetch(`${apiUrl}/api/slips/${selectedSlip.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ available: false })
-        });
-        
-        if (!updateResponse.ok) {
-          const errorData = await updateResponse.json().catch(() => ({}));
-          console.error('Failed to update slip availability:', errorData);
-        } else {
-          console.log('Slip availability updated to occupied');
-        }
-      } catch (error) {
-        console.error('Error updating slip availability:', error);
-      }
-
       // Update local bookings state with confirmed booking
       const [normalizedBooking] = transformBookingsData([newBookingData], allSlips.length ? allSlips : slips);
 
@@ -1482,22 +1653,6 @@ const DockRentalPlatform = () => {
       setBookings(updatedBookings);
       setAllBookings([...allBookings, normalizedBooking]);
       updateUserBookingsFromList(updatedBookings, currentUser);
-      
-      // Update local slips state to mark slip as occupied
-      setSlips(prevSlips => 
-        prevSlips.map(slip => 
-          slip.id === selectedSlip.id 
-            ? { ...slip, available: false }
-            : slip
-        )
-      );
-      setAllSlips(prevSlips => 
-        prevSlips.map(slip => 
-          slip.id === selectedSlip.id 
-            ? { ...slip, available: false }
-            : slip
-        )
-      );
       
       setShowPaymentPage(false);
       setCurrentView('browse');
@@ -1629,25 +1784,31 @@ const DockRentalPlatform = () => {
     return !hasOverlap;
   };
 
-  const filteredSlips = sortSlips(slips.filter(slip => {
-    // Filter by max length
-    if (searchFilters.maxLength && parseInt(searchFilters.maxLength) > slip.max_length) return false;
-    
-    // Filter by price range
-    if (searchFilters.priceRange) {
-      const [min, max] = searchFilters.priceRange.split('-').map(Number);
-      if (slip.price_per_night < min || slip.price_per_night > max) return false;
-    }
-    
-    // Filter by date range availability
-    if (searchFilters.dateRangeStart && searchFilters.dateRangeEnd) {
-      if (!isSlipAvailableForDateRange(slip, searchFilters.dateRangeStart, searchFilters.dateRangeEnd)) {
+  const filteredSlips = sortSlips(
+    slips.filter((slip) => {
+      if (!slip.available) return false;
+
+      // Filter by max length
+      if (searchFilters.maxLength && parseInt(searchFilters.maxLength) > slip.max_length) {
         return false;
       }
-    }
-    
-    return true;
-  }));
+
+      // Filter by price range
+      if (searchFilters.priceRange) {
+        const [min, max] = searchFilters.priceRange.split('-').map(Number);
+        if (slip.price_per_night < min || slip.price_per_night > max) return false;
+      }
+
+      // Filter by date range availability
+      if (searchFilters.dateRangeStart && searchFilters.dateRangeEnd) {
+        if (!isSlipAvailableForDateRange(slip, searchFilters.dateRangeStart, searchFilters.dateRangeEnd)) {
+          return false;
+        }
+      }
+
+      return true;
+    })
+  );
 
   const SlipCard = ({ slip }) => {
     // Helper function to format dimension values
@@ -1688,14 +1849,23 @@ const DockRentalPlatform = () => {
       searchFilters.dateRangeStart,
       searchFilters.dateRangeEnd
     );
+    const slipActive = Boolean(slip.available);
 
-    const availabilityBadgeClass = isDateFilterActive
-      ? (slipAvailableForRange ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800')
-      : 'bg-gray-100 text-gray-600';
+    const availabilityBadgeClass = !slipActive
+      ? 'bg-red-100 text-red-800'
+      : isDateFilterActive
+        ? slipAvailableForRange
+          ? 'bg-green-100 text-green-800'
+          : 'bg-yellow-100 text-yellow-800'
+        : 'bg-green-100 text-green-800';
 
-    const availabilityBadgeLabel = isDateFilterActive
-      ? (slipAvailableForRange ? 'Available' : 'Unavailable')
-      : 'Select dates to check availability';
+    const availabilityBadgeLabel = !slipActive
+      ? 'Inactive'
+      : isDateFilterActive
+        ? slipAvailableForRange
+          ? 'Available'
+          : 'Unavailable'
+        : 'Active';
 
     const slipBookings = bookings.filter((booking) => {
       const slipId = booking.slipId || booking.slip_id;
@@ -1895,7 +2065,7 @@ const DockRentalPlatform = () => {
 
           {renderAvailabilityCalendar()}
 
-          {(isDateFilterActive ? slipAvailableForRange : slip.available) && (
+          {(isDateFilterActive ? slipAvailableForRange : slipActive) && (
           <button
             onClick={() => {
               setSelectedSlip(slip);
@@ -3049,133 +3219,227 @@ const DockRentalPlatform = () => {
     }
   };
 
-  const handleEditEtiquette = (slip) => {
-    setEditingSlip({...slip, editingType: 'etiquette'});
-    setEditingEtiquette(slip.dockEtiquette || '');
-  };
-
-  const handleSaveEtiquette = async () => {
-    if (editingSlip && editingEtiquette) {
-      try {
-        // Save to database
-        const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/slips`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'update-slip',
-            slipId: editingSlip.id,
-            slipData: {
-              name: editingSlip.name,
-              description: editingSlip.description,
-              price_per_night: editingSlip.price_per_night,
-              dock_etiquette: editingEtiquette,
-              images: editingSlip.images
-            }
-          }),
-        });
-        
-        if (response.ok) {
-          const result = await response.json();
-          if (result.success) {
-            // Update local state
-            const updatedSlips = slips.map(slip => 
-              slip.id === editingSlip.id 
-                ? { ...slip, dockEtiquette: editingEtiquette }
-                : slip
-            );
-            setSlips(updatedSlips);
-            setEditingSlip(null);
-            setEditingEtiquette('');
-            alert('✅ Dock etiquette updated successfully!');
-          } else {
-            alert('❌ Failed to update dock etiquette: ' + result.error);
-          }
-        } else {
-          throw new Error('Failed to update dock etiquette');
-        }
-      } catch (error) {
-        console.error('Error updating dock etiquette:', error);
-        alert('❌ Failed to update dock etiquette. Please try again.');
-      }
-    }
-  };
-
   // Function to toggle slip availability
   const handleToggleSlipAvailability = async (slip) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/slips`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'update-slip',
-          slipId: slip.id,
-          slipData: {
-            name: slip.name,
-            description: slip.description,
-            price_per_night: slip.price_per_night,
-            dock_etiquette: slip.dockEtiquette,
-            images: slip.images,
-            available: !slip.available
-          }
-        }),
-      });
-      
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success) {
-          // Update local state
-          const updatedSlips = slips.map(s => 
-            s.id === slip.id 
-              ? { ...s, available: !s.available }
-              : s
-          );
-          setSlips(updatedSlips);
-          alert(`✅ ${slip.name} ${!slip.available ? 'activated' : 'deactivated'} successfully!`);
-        } else {
-          alert('❌ Failed to update slip availability: ' + result.error);
-        }
-      } else {
-        throw new Error('Failed to update slip availability');
-      }
+      const nextAvailable = !slip.available;
+      const payload = { available: nextAvailable };
+      const updatedSlip = await patchSlip(slip.id, payload);
+      applySlipUpdate(updatedSlip || { ...slip, available: nextAvailable });
+      alert(`✅ ${slip.name} ${nextAvailable ? 'activated' : 'deactivated'} successfully!`);
     } catch (error) {
       console.error('Error updating slip availability:', error);
-      alert('❌ Failed to update slip availability. Please try again.');
+      alert(`❌ Failed to update slip availability. ${error.message || 'Please try again.'}`);
     }
   };
 
-  // Function to add new slips to database
-  const handleAddNewSlips = async () => {
-    try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/add-new-slips`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
-      
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success) {
-          // Reload slips from database
-          const slipsResponse = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/slips`);
-          if (slipsResponse.ok) {
-            const slipsData = await slipsResponse.json();
-            setSlips(slipsData.slips || []);
-          }
-          alert(`✅ ${result.message}`);
-        } else {
-          alert('❌ Failed to add new slips: ' + result.error);
-        }
+  const resetNewSlipForm = () => {
+    if (newSlipImagePreview) {
+      URL.revokeObjectURL(newSlipImagePreview);
+    }
+    setNewSlipImagePreview(null);
+    setNewSlipForm({
+      name: '',
+      description: '',
+      pricePerNight: '',
+      maxBoatLength: '',
+      width: '',
+      depth: '',
+      amenities: '',
+      dockEtiquette: '',
+      locationSection: '',
+      locationPosition: '',
+      locationLat: '',
+      locationLng: '',
+      imageFile: null
+    });
+    setNewSlipFormErrors({});
+  };
+
+  const handleNewSlipInputChange = (field, value) => {
+    setNewSlipForm((prev) => ({
+      ...prev,
+      [field]: value
+    }));
+    setNewSlipFormErrors((prev) => ({
+      ...prev,
+      [field]: null
+    }));
+  };
+
+  const handleNewSlipImageSelection = (event) => {
+    const file = event.target?.files?.[0] || null;
+
+    if (newSlipImagePreview) {
+      URL.revokeObjectURL(newSlipImagePreview);
+    }
+
+    if (!file) {
+      setNewSlipForm((prev) => ({ ...prev, imageFile: null }));
+      setNewSlipImagePreview(null);
+      setNewSlipFormErrors((prev) => ({ ...prev, image: null }));
+      event.target.value = '';
+      return;
+    }
+
+    const validation = validateFile(file, ['image/jpeg', 'image/png', 'image/webp'], 10);
+    if (!validation.valid) {
+      setNewSlipFormErrors((prev) => ({ ...prev, image: validation.error }));
+      setNewSlipForm((prev) => ({ ...prev, imageFile: null }));
+      setNewSlipImagePreview(null);
+      event.target.value = '';
+      return;
+    }
+
+    setNewSlipForm((prev) => ({ ...prev, imageFile: file }));
+    setNewSlipImagePreview(URL.createObjectURL(file));
+    setNewSlipFormErrors((prev) => ({ ...prev, image: null }));
+  };
+
+  const handleSubmitNewSlipForm = async (event) => {
+    event.preventDefault();
+
+    if (!currentUser?.id) {
+      alert('❌ You must be logged in as an admin to add a slip.');
+      return;
+    }
+
+    const trimmedName = newSlipForm.name.trim();
+    const trimmedDescription = newSlipForm.description.trim();
+    const trimmedDockEtiquette = newSlipForm.dockEtiquette.trim();
+    const trimmedAmenities = newSlipForm.amenities.trim();
+    const errors = {};
+
+    if (!trimmedName) {
+      errors.name = 'Slip name is required.';
+    }
+
+    const price = parseFloat(newSlipForm.pricePerNight);
+    if (Number.isNaN(price) || price < 0) {
+      errors.pricePerNight = 'Enter a valid price (0 or higher).';
+    }
+
+    const parseOptionalNumber = (value) => {
+      if (!value && value !== 0) return null;
+      const parsed = parseFloat(value);
+      return Number.isNaN(parsed) ? null : parsed;
+    };
+
+    const maxBoatLengthValue = parseFloat(newSlipForm.maxBoatLength);
+    if (Number.isNaN(maxBoatLengthValue) || maxBoatLengthValue <= 0) {
+      errors.maxBoatLength = 'Enter a valid maximum boat length (ft).';
+    }
+
+    const widthValue = parseFloat(newSlipForm.width);
+    if (Number.isNaN(widthValue) || widthValue <= 0) {
+      errors.width = 'Enter a valid slip width (ft).';
+    }
+
+    const depthValue = parseFloat(newSlipForm.depth);
+    if (Number.isNaN(depthValue) || depthValue <= 0) {
+      errors.depth = 'Enter a valid slip depth (ft).';
+    }
+
+    const lat = parseOptionalNumber(newSlipForm.locationLat);
+    if (newSlipForm.locationLat && lat === null) {
+      errors.locationLat = 'Enter a valid latitude.';
+    }
+
+    const lng = parseOptionalNumber(newSlipForm.locationLng);
+    if (newSlipForm.locationLng && lng === null) {
+      errors.locationLng = 'Enter a valid longitude.';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setNewSlipFormErrors(errors);
+      return;
+    }
+
+    const amenitiesArray = trimmedAmenities
+      ? trimmedAmenities.split(',').map((item) => item.trim()).filter(Boolean)
+      : [];
+
+    const slipPayload = {
+      name: trimmedName,
+      description: trimmedDescription || null,
+      price_per_night: price,
+      max_boat_length: maxBoatLengthValue,
+      width: widthValue,
+      depth: depthValue,
+      amenities: amenitiesArray,
+      dock_etiquette: trimmedDockEtiquette || null,
+      available: false,
+      created_by: currentUser.id,
+      images: []
+    };
+
+    const locationPayload = {};
+    if (newSlipForm.locationSection.trim()) {
+      locationPayload.section = newSlipForm.locationSection.trim();
+    }
+    if (newSlipForm.locationPosition.trim()) {
+      const parsedPosition = parseOptionalNumber(newSlipForm.locationPosition);
+      if (parsedPosition !== null) {
+        locationPayload.position = parsedPosition;
       } else {
-        throw new Error('Failed to add new slips');
+        setNewSlipFormErrors((prev) => ({
+          ...prev,
+          locationPosition: 'Enter a valid number for slip position.'
+        }));
+        return;
       }
+    }
+    if (lat !== null && lng !== null) {
+      locationPayload.coordinates = { lat, lng };
+    }
+    if (Object.keys(locationPayload).length > 0) {
+      slipPayload.location_data = locationPayload;
+    }
+
+    setNewSlipSubmitting(true);
+    try {
+      const inserted = await addSlips({ slipPayload });
+      const createdSlip = inserted?.[0];
+
+      if (createdSlip?.id && newSlipForm.imageFile) {
+        const uploadResult = await uploadSlipImage(newSlipForm.imageFile, createdSlip.id);
+        if (uploadResult.success && uploadResult.url) {
+          try {
+            const updatedSlip = await patchSlip(createdSlip.id, { images: [uploadResult.url] });
+            if (updatedSlip) {
+              applySlipUpdate(updatedSlip);
+            }
+          } catch (imageUpdateError) {
+            console.error('Error saving slip image URL:', imageUpdateError);
+          }
+        } else if (uploadResult.error) {
+          console.error('Image upload failed for new slip:', uploadResult.error);
+          alert(`⚠️ Slip was created, but the image could not be uploaded: ${uploadResult.error}`);
+        }
+      }
+
+      await refreshSlipsFromServer();
+      resetNewSlipForm();
+      alert('✅ Slip added successfully! It has been set to inactive by default.');
     } catch (error) {
-      console.error('Error adding new slips:', error);
-      alert('❌ Failed to add new slips. Please try again.');
+      console.error('Error adding slip:', error);
+      alert(`❌ Failed to add slip. ${error.message || 'Please try again.'}`);
+    } finally {
+      setNewSlipSubmitting(false);
+    }
+  };
+
+  const handleAddDefaultSlips = async () => {
+    setNewSlipSubmitting(true);
+    try {
+      await addSlips({ generateDefault: true });
+      await refreshSlipsFromServer();
+      alert('✅ Slips 13 & 14 added or updated successfully. They remain inactive until activated.');
+    } catch (error) {
+      console.error('Error adding default slips:', error);
+      alert(`❌ Failed to add slips 13 & 14. ${error.message || 'Please try again.'}`);
+    } finally {
+      setNewSlipSubmitting(false);
     }
   };
 
@@ -3362,7 +3626,6 @@ const DockRentalPlatform = () => {
 
 
 
-  const [editingEtiquette, setEditingEtiquette] = useState('');
   const [showEtiquetteModal, setShowEtiquetteModal] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   const [showUserEditModal, setShowUserEditModal] = useState(false);
@@ -4849,48 +5112,255 @@ const DockRentalPlatform = () => {
                 <h3 className="text-lg font-semibold mb-4">Slip Management</h3>
                 
                 {/* New Slips Management */}
-                <div className="bg-blue-50 p-4 rounded-lg mb-6">
-                  <h4 className="font-semibold text-blue-800 mb-2">Add New Slips</h4>
-                  <p className="text-sm text-blue-700 mb-3">
-                    Add Slips 13 and 14 to the database. These slips will be initially deactivated and can be activated from the admin panel.
-                  </p>
-                  <button
-                    onClick={handleAddNewSlips}
-                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                  >
-                    Add Slips 13 & 14 to Database
-                  </button>
-                </div>
+                <details className="bg-blue-50 rounded-lg mb-6">
+                  <summary className="flex items-center justify-between cursor-pointer px-4 py-3">
+                    <span className="font-semibold text-blue-800">Add New Slip</span>
+                    <span className="text-sm text-blue-700">Expand to create a slip</span>
+                  </summary>
+                  <div className="px-4 pb-4">
+                    <p className="text-sm text-blue-700 mb-4">
+                      Create a brand-new slip with custom details. Each slip is created as inactive so you can review it before showing it on the site.
+                    </p>
 
-                {/* Slip Availability Management */}
+                    <form onSubmit={handleSubmitNewSlipForm} className="space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Slip Name<span className="text-red-600">*</span></label>
+                        <input
+                          type="text"
+                          value={newSlipForm.name}
+                          onChange={(e) => handleNewSlipInputChange('name', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.name ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. Slip 15"
+                        />
+                        {newSlipFormErrors.name && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.name}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Price per Night (USD)<span className="text-red-600">*</span></label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={newSlipForm.pricePerNight}
+                          onChange={(e) => handleNewSlipInputChange('pricePerNight', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.pricePerNight ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. 75"
+                        />
+                        {newSlipFormErrors.pricePerNight && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.pricePerNight}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Max Boat Length (ft)<span className="text-red-600">*</span></label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={newSlipForm.maxBoatLength}
+                          onChange={(e) => handleNewSlipInputChange('maxBoatLength', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.maxBoatLength ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. 30"
+                          required
+                        />
+                        {newSlipFormErrors.maxBoatLength && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.maxBoatLength}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Slip Width (ft)<span className="text-red-600">*</span></label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={newSlipForm.width}
+                          onChange={(e) => handleNewSlipInputChange('width', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.width ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. 12"
+                          required
+                        />
+                        {newSlipFormErrors.width && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.width}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Slip Depth (ft)<span className="text-red-600">*</span></label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={newSlipForm.depth}
+                          onChange={(e) => handleNewSlipInputChange('depth', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.depth ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. 6"
+                          required
+                        />
+                        {newSlipFormErrors.depth && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.depth}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Slip Position</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={newSlipForm.locationPosition}
+                          onChange={(e) => handleNewSlipInputChange('locationPosition', e.target.value)}
+                          className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.locationPosition ? 'border-red-500' : 'border-gray-300'}`}
+                          placeholder="e.g. 15"
+                        />
+                        {newSlipFormErrors.locationPosition && (
+                          <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.locationPosition}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700">Dock Section</label>
+                        <input
+                          type="text"
+                          value={newSlipForm.locationSection}
+                          onChange={(e) => handleNewSlipInputChange('locationSection', e.target.value)}
+                          className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                          placeholder="e.g. D"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700">Latitude</label>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            value={newSlipForm.locationLat}
+                            onChange={(e) => handleNewSlipInputChange('locationLat', e.target.value)}
+                            className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.locationLat ? 'border-red-500' : 'border-gray-300'}`}
+                            placeholder="26.3614"
+                          />
+                          {newSlipFormErrors.locationLat && (
+                            <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.locationLat}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700">Longitude</label>
+                          <input
+                            type="number"
+                            step="0.0001"
+                            value={newSlipForm.locationLng}
+                            onChange={(e) => handleNewSlipInputChange('locationLng', e.target.value)}
+                            className={`mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${newSlipFormErrors.locationLng ? 'border-red-500' : 'border-gray-300'}`}
+                            placeholder="-80.0833"
+                          />
+                          {newSlipFormErrors.locationLng && (
+                            <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.locationLng}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Description</label>
+                      <textarea
+                        value={newSlipForm.description}
+                        onChange={(e) => handleNewSlipInputChange('description', e.target.value)}
+                        className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        rows="3"
+                        placeholder="Describe the slip, including utility info or special notes."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Amenities</label>
+                      <input
+                        type="text"
+                        value={newSlipForm.amenities}
+                        onChange={(e) => handleNewSlipInputChange('amenities', e.target.value)}
+                        className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        placeholder="e.g. Water, Electric (120V)"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Separate amenities with commas.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Dock Etiquette</label>
+                      <textarea
+                        value={newSlipForm.dockEtiquette}
+                        onChange={(e) => handleNewSlipInputChange('dockEtiquette', e.target.value)}
+                        className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        rows="3"
+                        placeholder="Optional: add slip-specific etiquette notes."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Slip Image</label>
+                      <input
+                        type="file"
+                        accept="image/png, image/jpeg, image/webp"
+                        onChange={handleNewSlipImageSelection}
+                        className="mt-1 w-full text-sm text-gray-600"
+                      />
+                      {newSlipFormErrors.image && (
+                        <p className="mt-1 text-xs text-red-600">{newSlipFormErrors.image}</p>
+                      )}
+                      {newSlipImagePreview && (
+                        <div className="mt-2">
+                          <img
+                            src={newSlipImagePreview}
+                            alt="Slip preview"
+                            className="h-24 w-24 rounded object-cover shadow"
+                          />
+                          <button
+                            type="button"
+                            className="mt-2 text-xs text-red-600 underline"
+                            onClick={() => {
+                              if (newSlipImagePreview) {
+                                URL.revokeObjectURL(newSlipImagePreview);
+                              }
+                              setNewSlipImagePreview(null);
+                              setNewSlipForm((prev) => ({ ...prev, imageFile: null }));
+                              if (newSlipFormErrors.image) {
+                                setNewSlipFormErrors((prev) => ({ ...prev, image: null }));
+                              }
+                            }}
+                          >
+                            Remove image
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="submit"
+                        className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:cursor-not-allowed disabled:bg-blue-300"
+                        disabled={newSlipSubmitting}
+                      >
+                        {newSlipSubmitting ? 'Adding Slip...' : 'Add Slip & Keep Inactive'}
+                      </button>
+                      <button
+                        type="button"
+                        className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors"
+                        onClick={resetNewSlipForm}
+                        disabled={newSlipSubmitting}
+                      >
+                        Clear Form
+                      </button>
+                    </div>
+                    <p className="text-xs text-blue-600">
+                      Each new slip is created with status <span className="font-semibold">inactive</span>. Activate it from the list below when it&rsquo;s ready to be shown on the site.
+                    </p>
+                    </form>
+                  </div>
+                </details>
+
+                {/*
                 <div className="bg-green-50 p-4 rounded-lg mb-6">
                   <h4 className="font-semibold text-green-800 mb-2">Slip Availability Control</h4>
                   <p className="text-sm text-green-700 mb-3">
                     Activate or deactivate slips. Deactivated slips will not appear in the booking interface.
                   </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {slips.filter(slip => slip.name.includes('Slip 13') || slip.name.includes('Slip 14')).map(slip => (
-                      <div key={slip.id} className="bg-white p-3 rounded border">
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="font-medium">{slip.name}</span>
-                          <span className={`px-2 py-1 rounded text-xs ${slip.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                            {slip.available ? 'Active' : 'Inactive'}
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => handleToggleSlipAvailability(slip)}
-                          className={`w-full px-3 py-1 rounded text-sm font-medium transition-colors ${
-                            slip.available 
-                              ? 'bg-red-600 text-white hover:bg-red-700' 
-                              : 'bg-green-600 text-white hover:bg-green-700'
-                          }`}
-                        >
-                          {slip.available ? 'Deactivate' : 'Activate'}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
                 </div>
+                */}
                 
                 {/* Slip Descriptions and Pricing */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -4898,9 +5368,21 @@ const DockRentalPlatform = () => {
                     <div key={slip.id} className="border rounded-lg p-4">
                       <div className="flex justify-between items-start mb-2">
                         <h4 className="font-medium">{slip.name}</h4>
-                        <span className={`px-2 py-1 rounded text-xs ${slip.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                          {slip.available ? 'Available' : 'Occupied'}
+                        <div className="flex items-center space-x-2">
+                          <span className={`px-2 py-1 rounded text-xs ${slip.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                            {slip.available ? 'Active' : 'Inactive'}
                         </span>
+                          <button
+                            onClick={() => handleToggleSlipAvailability(slip)}
+                            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+                              slip.available
+                                ? 'bg-red-600 text-white hover:bg-red-700'
+                                : 'bg-green-600 text-white hover:bg-green-700'
+                            }`}
+                          >
+                            {slip.available ? 'Deactivate' : 'Activate'}
+                          </button>
+                        </div>
                       </div>
                       
                       {/* Description Editing */}
@@ -5000,7 +5482,7 @@ const DockRentalPlatform = () => {
                           imageSrc = slip.images;
                         }
                         
-                        return imageSrc ? (
+                        return imageSrc && (!editingSlip || editingSlip.id !== slip.id || editingSlip.editingType !== 'image') ? (
                           <div className="mt-3">
                             <div className="mb-2">
                               <img 
@@ -5012,22 +5494,56 @@ const DockRentalPlatform = () => {
                           </div>
                         ) : null;
                       })()}
+
+                      {editingSlip?.id === slip.id && editingSlip.editingType === 'image' ? (
+                        <div className="mt-3 space-y-2">
+                          {editingImage ? (
+                            <div>
+                              <img
+                                src={editingImage}
+                                alt={`${slip.name} preview`}
+                                className="w-full h-24 object-cover rounded border"
+                              />
+                    </div>
+                          ) : null}
+                          <input
+                            key={`slip-image-input-${slip.id}`}
+                            type="file"
+                            accept="image/*"
+                            onChange={handleImageFileChange}
+                            className="block w-full text-sm text-gray-600"
+                          />
+                          {imageUploadError && (
+                            <p className="text-xs text-red-600">{imageUploadError}</p>
+                          )}
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={handleSaveImage}
+                              disabled={isUploading}
+                              className={`px-3 py-1 rounded text-sm text-white ${isUploading ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-700'}`}
+                            >
+                              {isUploading ? 'Saving...' : 'Save Image'}
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
+                            >
+                              Cancel
+                            </button>
+                </div>
+                  </div>
+                      ) : (
+                        <div className="mt-2">
+                          <button
+                            onClick={() => handleStartImageEdit(slip)}
+                            className="px-3 py-1 bg-orange-600 text-white rounded text-sm hover:bg-orange-700"
+                          >
+                            {slip.images && slip.images.length ? 'Change Image' : 'Add Image'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
-                </div>
-
-                {/* Bulk Image Management */}
-                <div className="mt-8">
-                  <h3 className="text-lg font-semibold mb-4">Bulk Image Management</h3>
-                  
-                  <div className="bg-yellow-50 p-4 rounded-lg mb-6">
-                    <h4 className="font-semibold text-yellow-800 mb-2">Quick Image Actions</h4>
-                    <p className="text-sm text-yellow-700">
-                      Use these buttons to quickly update all dock slip images at once. 
-                      Individual slip images can still be edited above.
-                    </p>
-                  </div>
-
                 </div>
 
                 {/* Dock Etiquette Management */}
@@ -5037,65 +5553,69 @@ const DockRentalPlatform = () => {
                   <div className="bg-blue-50 p-4 rounded-lg mb-6">
                     <h4 className="font-semibold text-blue-800 mb-2">About Dock Etiquette</h4>
                     <p className="text-sm text-blue-700">
-                      Set and manage dock etiquette rules for each slip. These rules help ensure proper marina behavior 
-                      and create a respectful environment for all users. Users will see these rules during booking.
+                      Set and manage dock etiquette rules for all slips. These rules help ensure proper marina behavior 
+                      and create a respectful environment for all users. Renters will see these rules during booking.
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {slips.map(slip => (
-                      <div key={slip.id} className="border rounded-lg p-4">
-                        <div className="flex justify-between items-start mb-3">
-                          <h4 className="font-medium">{slip.name}</h4>
-                          <span className={`px-2 py-1 rounded text-xs ${slip.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                            {slip.available ? 'Available' : 'Occupied'}
-                          </span>
-                        </div>
-                        
-                        {/* Etiquette Editing */}
-                        {editingSlip?.id === slip.id && editingSlip.editingType === 'etiquette' ? (
-                          <div className="space-y-2">
-                            <label className="block text-sm font-medium text-gray-700">Dock Etiquette Rules</label>
-                            <textarea
-                              value={editingEtiquette}
-                              onChange={(e) => setEditingEtiquette(e.target.value)}
-                              placeholder="Enter dock etiquette rules..."
-                              className="w-full p-2 border rounded text-sm"
-                              rows="6"
-                            />
-                            <div className="flex space-x-2">
-                              <button
-                                onClick={handleSaveEtiquette}
-                                className="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700"
-                              >
-                                Save Rules
-                              </button>
-                              <button
-                                onClick={handleCancelEdit}
-                                className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div>
-                            <div className="mb-3">
-                              <h5 className="text-sm font-medium text-gray-700 mb-2">Current Rules:</h5>
-                              <div className="bg-gray-50 p-3 rounded text-sm text-gray-700 whitespace-pre-line">
-                                {slip.dockEtiquette || 'No etiquette rules set for this slip.'}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => handleEditEtiquette(slip)}
-                              className="px-3 py-1 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700"
-                            >
-                              Edit Etiquette
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap gap-2">
+                      <span className="text-sm font-medium text-blue-800 mr-1">Quick Etiquette Templates:</span>
+                      <button
+                        onClick={() => {
+                          const standardRules = "• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required";
+                          setCommonEtiquette(standardRules);
+                        }}
+                        className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
+                      >
+                        Standard
+                      </button>
+                      <button
+                        onClick={() => {
+                          const familyRules = "• Family-friendly environment\n• Respect quiet hours (9 PM - 8 AM)\n• Supervise children at all times\n• Keep slip area clean and organized\n• Follow all safety protocols\n• No pets without permission\n• Proper waste disposal required";
+                          setCommonEtiquette(familyRules);
+                        }}
+                        className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200"
+                      >
+                        Family-Friendly
+                      </button>
+                      <button
+                        onClick={() => {
+                          const premiumRules = "• Respect quiet hours (10 PM - 7 AM)\n• Professional conduct required at all times\n• No outside contractors without approval\n• Report maintenance issues immediately\n• Keep dock clear of personal items\n• Proper waste and recycling disposal required";
+                          setCommonEtiquette(premiumRules);
+                        }}
+                        className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded hover:bg-purple-200"
+                      >
+                        Premium
+                      </button>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Dock Etiquette Rules</label>
+                      <textarea
+                        value={commonEtiquette}
+                        onChange={(e) => setCommonEtiquette(e.target.value)}
+                        placeholder="Enter dock etiquette rules..."
+                        className="w-full p-2 border rounded text-sm"
+                        rows="6"
+                      />
+                    </div>
+
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={handleSaveCommonEtiquette}
+                        disabled={etiquetteSaving}
+                        className={`px-3 py-1 text-sm text-white rounded ${etiquetteSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+                      >
+                        {etiquetteSaving ? 'Saving...' : 'Save Rules'}
+                      </button>
+                      <button
+                        onClick={() => setCommonEtiquette('')}
+                        className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
+                      >
+                        Clear
+                      </button>
+                    </div>
                   </div>
 
                   {/* Quick Etiquette Templates */}
@@ -5107,7 +5627,7 @@ const DockRentalPlatform = () => {
                         <button
                           onClick={() => {
                             const standardRules = "• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required";
-                            setEditingEtiquette(standardRules);
+                            setCommonEtiquette(standardRules);
                           }}
                           className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
                         >
@@ -5119,7 +5639,7 @@ const DockRentalPlatform = () => {
                         <button
                           onClick={() => {
                             const familyRules = "• Family-friendly environment\n• Respect quiet hours (9 PM - 8 AM)\n• Supervise children at all times\n• Keep slip area clean and organized\n• Follow all safety protocols\n• No pets without permission\n• Proper waste disposal required";
-                            setEditingEtiquette(familyRules);
+                            setCommonEtiquette(familyRules);
                           }}
                           className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200"
                         >
