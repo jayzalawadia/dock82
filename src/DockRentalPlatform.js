@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Calendar, MapPin, Anchor, Clock, DollarSign, User, Settings, Plus, Edit, Trash2, Check, X, Filter, Search, CreditCard, Lock, Eye, EyeOff } from 'lucide-react';
 import { loadStripe } from '@stripe/stripe-js';
 import { Elements } from '@stripe/react-stripe-js';
@@ -64,6 +64,15 @@ const DockRentalPlatform = () => {
   const [adminMode, setAdminMode] = useState(false);
   const [superAdminMode, setSuperAdminMode] = useState(false);
   const [notifications, setNotifications] = useState([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationForm, setNotificationForm] = useState({
+    title: '',
+    message: '',
+    recipientIds: []
+  });
+  const [notificationSending, setNotificationSending] = useState(false);
+  const [notificationFeedback, setNotificationFeedback] = useState(null);
+  const [expandedNotificationId, setExpandedNotificationId] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [allAdmins, setAllAdmins] = useState([]);
   const [showAdminManagement, setShowAdminManagement] = useState(false);
@@ -87,6 +96,7 @@ const DockRentalPlatform = () => {
   const [showCancellationModal, setShowCancellationModal] = useState(null);
   const [cancellationReason, setCancellationReason] = useState('');
   const [editingSlip, setEditingSlip] = useState(null);
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
   const [editingDescription, setEditingDescription] = useState('');
   const [editingPrice, setEditingPrice] = useState('');
   const [showBookingManagement, setShowBookingManagement] = useState(false);
@@ -115,24 +125,69 @@ const DockRentalPlatform = () => {
     userType: 'renter'
   });
   const [userBookings, setUserBookings] = useState([]);
-  const updateUserBookingsFromList = useCallback((bookingList = []) => {
-    if (!currentUser) {
-      setUserBookings([]);
-      return;
-    }
+  const updateUserBookingsFromList = useCallback(
+    (bookingList = [], user = currentUser) => {
+      if (!user) {
+        setUserBookings([]);
+        return;
+      }
 
-    const filtered = bookingList.filter(booking =>
-      (booking.user_id && booking.user_id === currentUser.id) ||
-      (!booking.user_id && booking.guestEmail === currentUser.email)
-    );
+      const filtered = bookingList.filter(booking =>
+        (booking.user_id && booking.user_id === user.id) ||
+        (!booking.user_id && booking.guestEmail === user.email)
+      );
 
-    setUserBookings(filtered);
-  }, [currentUser]);
+      setUserBookings(filtered);
+    },
+    [currentUser]
+  );
+
+  const fetchNotifications = useCallback(
+    async (targetUserId) => {
+      if (!targetUserId) {
+        setNotifications([]);
+        return;
+      }
+      setNotificationsLoading(true);
+      setNotificationFeedback(null);
+      try {
+      const response = await fetch(`${API_BASE_URL}/api/notifications?user_id=${targetUserId}`);
+      if (response.status === 404) {
+        setNotifications([]);
+        setNotificationFeedback(null);
+        return;
+      }
+        if (!response.ok) {
+          throw new Error('Failed to load notifications');
+        }
+        const data = await response.json();
+        const normalized = (data.notifications || []).map((notification) => ({
+          id: notification.id,
+          title: notification.title || 'Notification',
+          message: notification.message || '',
+          createdAt: notification.created_at,
+          readAt: notification.read_at,
+          createdBy: notification.created_by,
+          recipientId: notification.recipient_user_id
+        }));
+        setNotifications(normalized);
+      setNotificationFeedback(null);
+      } catch (error) {
+      console.warn('Error fetching notifications:', error);
+        setNotificationFeedback(error.message || 'Failed to load notifications.');
+        setNotifications([]);
+      } finally {
+        setNotificationsLoading(false);
+      }
+    },
+    [API_BASE_URL]
+  );
 
   const [editingImage, setEditingImage] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [slipsLoading, setSlipsLoading] = useState(true);
+  const [dataInitialized, setDataInitialized] = useState(false);
   const [cancellationPolicy] = useState({
     homeowner: { fee: 0, description: "Free cancellation anytime" },
     renter: {
@@ -220,6 +275,11 @@ const DockRentalPlatform = () => {
     if (!value) return 'renter';
     return value.toString().toLowerCase();
   };
+
+  const unreadNotificationsCount = useMemo(
+    () => notifications.filter((notification) => !notification.readAt).length,
+    [notifications]
+  );
 
   const [slips, setSlips] = useState([]);
   const [allSlips, setAllSlips] = useState([]);
@@ -341,6 +401,67 @@ const DockRentalPlatform = () => {
     });
   };
 
+  const getPaymentStatusLabel = (status) => {
+    switch ((status || '').toLowerCase()) {
+      case 'pending':
+        return 'Awaiting approval (card on hold)';
+      case 'paid':
+        return 'Paid';
+      case 'refunded':
+        return 'Refunded';
+      case 'failed':
+        return 'Authorization voided';
+      case 'partial':
+        return 'Partially refunded';
+      case 'exempt':
+        return 'Exempt (no charge)';
+      default:
+        return status || 'Unknown';
+    }
+  };
+
+  const markNotificationAsRead = useCallback(
+    async (notification) => {
+      if (!currentUser?.id || notification.readAt) {
+        return;
+      }
+      try {
+        await fetch(`${API_BASE_URL}/api/notifications/${notification.id}/read`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUser.id })
+        });
+      } catch (error) {
+        console.warn('Error marking notification as read:', error);
+      }
+    },
+    [API_BASE_URL, currentUser?.id]
+  );
+
+  const formatDateTime = (value) => {
+    if (!value) return '';
+    try {
+      return new Date(value).toLocaleString();
+    } catch (error) {
+      return value;
+    }
+  };
+
+  const toggleNotificationExpansion = (notification) => {
+    setExpandedNotificationId((prev) =>
+      prev === notification.id ? null : notification.id
+    );
+
+    if (!notification.readAt) {
+      setNotifications((prev) =>
+        prev.map((item) =>
+          item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item
+        )
+      );
+      markNotificationAsRead(notification);
+    }
+  };
+
   // Helper function to calculate booking total with discount
   const calculateBookingTotal = (checkIn, checkOut, price_per_night) => {
     if (!checkIn || !checkOut || !price_per_night) {
@@ -444,11 +565,7 @@ const DockRentalPlatform = () => {
           }
           
           // Load user's bookings - filter by user_id (with fallback to email for backward compatibility)
-          const userBookings = bookings.filter(booking => 
-            (booking.user_id && booking.user_id === userProfile.id) || 
-            (!booking.user_id && booking.guestEmail === userProfile.email)
-          );
-          setUserBookings(userBookings);
+          updateUserBookingsFromList(bookings, userProfile);
           
           console.log('AUTH DEBUG - Session restored successfully');
             } else {
@@ -514,11 +631,7 @@ const DockRentalPlatform = () => {
           }
           
           // Load user's bookings
-          const userBookings = bookings.filter(booking => 
-            (booking.user_id && booking.user_id === userProfile.id) || 
-            (!booking.user_id && booking.guestEmail === userProfile.email)
-          );
-          setUserBookings(userBookings);
+          updateUserBookingsFromList(bookings, userProfile);
           } else {
             // Profile not found - create minimal user from session
             console.warn('AUTH DEBUG - Profile not found, using minimal user from session');
@@ -592,6 +705,26 @@ const DockRentalPlatform = () => {
   useEffect(() => {
     updateUserBookingsFromList(bookings);
   }, [bookings, updateUserBookingsFromList]);
+
+  useEffect(() => {
+    if (currentView === 'bookings') {
+      updateUserBookingsFromList(bookings);
+    }
+  }, [currentView, bookings, updateUserBookingsFromList]);
+
+  useEffect(() => {
+    if (currentUser?.id) {
+      fetchNotifications(currentUser.id);
+    } else {
+      setNotifications([]);
+    }
+  }, [currentUser?.id, fetchNotifications]);
+
+  useEffect(() => {
+    if (currentView === 'notifications' && adminMode && allUsers.length === 0) {
+      loadAllUsers();
+    }
+  }, [currentView, adminMode, allUsers.length]);
 
   // Re-transform bookings when slips are loaded to add slipName
   useEffect(() => {
@@ -686,16 +819,6 @@ const DockRentalPlatform = () => {
     };
 
     setBookings(bookings.map(b => b.id === booking.id ? updatedBooking : b));
-    
-    // Add notification
-    setNotifications([...notifications, {
-      id: Date.now(),
-      type: 'cancellation',
-      recipient: 'Admin',
-      subject: `Booking Cancelled - ${booking.slipName}`,
-      message: `${booking.guestName} has cancelled their booking for ${booking.checkIn} to ${booking.checkOut}. Reason: ${cancellationReason}. Refund: $${(refundAmount || 0).toFixed(2)}`,
-      timestamp: new Date().toLocaleString()
-    }]);
 
     setShowCancellationModal(null);
     setCancellationReason('');
@@ -1273,8 +1396,8 @@ const DockRentalPlatform = () => {
           nights,
         total_cost: finalTotal,
           status: bookingData.userType === 'homeowner' ? 'confirmed' : 'pending',
-          payment_status: bookingData.userType === 'homeowner' ? 'paid' : 'paid',
-        payment_date: new Date().toISOString(),
+          payment_status: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
+        payment_date: bookingData.userType === 'homeowner' ? new Date().toISOString() : null,
           payment_method: bookingData.userType === 'homeowner' ? 'exempt' : 'stripe',
           payment_reference: paymentResult.paymentIntentId,
           rental_agreement_name: rentalAgreementName,
@@ -1311,7 +1434,8 @@ const DockRentalPlatform = () => {
           nights,
           totalCost: finalTotal,
           status: bookingData.userType === 'homeowner' ? 'confirmed' : 'pending',
-          paymentStatus: 'paid',
+          paymentStatus: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
+          payment_status: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
           rentalAgreementName: rentalAgreementName,
           rentalAgreementPath: finalRentalAgreementPath,
           insuranceProofName: insuranceProofName,
@@ -1319,8 +1443,10 @@ const DockRentalPlatform = () => {
           boatPicturePath: boatPicturePath,
           paymentIntentId: paymentResult.paymentIntentId
         };
-        setBookings([...bookings, tempBooking]);
+        const backupBookings = [...bookings, tempBooking];
+        setBookings(backupBookings);
         setAllBookings([...allBookings, tempBooking]);
+        updateUserBookingsFromList(backupBookings, currentUser);
         setShowPaymentPage(false);
         setCurrentView('browse');
         return;
@@ -1352,8 +1478,10 @@ const DockRentalPlatform = () => {
       // Update local bookings state with confirmed booking
       const [normalizedBooking] = transformBookingsData([newBookingData], allSlips.length ? allSlips : slips);
 
-      setBookings([...bookings, normalizedBooking]);
+      const updatedBookings = [...bookings, normalizedBooking];
+      setBookings(updatedBookings);
       setAllBookings([...allBookings, normalizedBooking]);
+      updateUserBookingsFromList(updatedBookings, currentUser);
       
       // Update local slips state to mark slip as occupied
       setSlips(prevSlips => 
@@ -1375,16 +1503,6 @@ const DockRentalPlatform = () => {
       setCurrentView('browse');
       
       // Send confirmation emails
-      if (bookingData.userType === 'renter') {
-      await sendEmailNotification('paymentReceipt', bookingData.guestEmail, {
-        guestName: bookingData.guestName,
-        slipName: selectedSlip.name,
-        paymentIntentId: paymentResult.paymentIntentId,
-        amount: finalTotal,
-        paymentMethod: paymentResult.paymentMethod || 'stripe'
-      });
-      }
-      
       await sendEmailNotification('bookingPending', bookingData.guestEmail, {
         guestName: bookingData.guestName,
         slipName: selectedSlip.name,
@@ -1395,7 +1513,7 @@ const DockRentalPlatform = () => {
         totalAmount: finalTotal
       });
 
-      alert('Payment successful! Your booking request has been submitted for approval. You will receive a confirmation email once it is approved.');
+      alert('Payment authorization successful! Your booking request has been submitted for approval. Your card will be charged only after Dock82 confirms the reservation.');
     } catch (error) {
       console.error('Payment completion error:', error);
       alert('Payment processed but there was an error completing the booking. Please contact support.');
@@ -1999,11 +2117,7 @@ const DockRentalPlatform = () => {
         }
         
         // Load user's bookings
-        const userBookings = bookings.filter(booking => 
-          (booking.user_id && booking.user_id === userProfile.id) || 
-          (!booking.user_id && booking.guestEmail === userProfile.email)
-        );
-        setUserBookings(userBookings);
+        updateUserBookingsFromList(bookings, userProfile);
         
         alert(`Welcome, ${userProfile.name}! You have ${userProfile.user_type} access.`);
       }
@@ -2456,6 +2570,7 @@ const DockRentalPlatform = () => {
         userType: 'renter'
       });
       setShowProfileModal(false);
+      setNotifications([]);
       
       console.log('AUTH DEBUG - Logout successful');
     } catch (error) {
@@ -2558,7 +2673,7 @@ const DockRentalPlatform = () => {
 
   const loadAllUsers = async () => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/admin?action=users`);
+      const response = await fetch(`${API_BASE_URL}/api/admin/users`);
       if (response.ok) {
         const data = await response.json();
         setAllUsers(data.users || []);
@@ -2570,7 +2685,7 @@ const DockRentalPlatform = () => {
 
   const loadAllAdmins = async () => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/admin?action=admins`);
+      const response = await fetch(`${API_BASE_URL}/api/admin/admins`);
       if (response.ok) {
         const data = await response.json();
         setAllAdmins(data.admins || []);
@@ -2689,6 +2804,61 @@ const DockRentalPlatform = () => {
     } catch (error) {
       console.error('Error promoting property owner to admin:', error);
       alert('❌ Failed to promote property owner to admin. Please try again.');
+    }
+  };
+
+  const handleSendNotification = async (e) => {
+    e.preventDefault();
+    if (!currentUser?.id) {
+      alert('You must be logged in to send notifications.');
+      return;
+    }
+    if (!notificationForm.title.trim() || !notificationForm.message.trim()) {
+      alert('Please provide both a title and message for the notification.');
+      return;
+    }
+    if (notificationForm.recipientIds.length === 0) {
+      alert('Please select at least one recipient.');
+      return;
+    }
+
+    setNotificationSending(true);
+    setNotificationFeedback(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/notifications`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          title: notificationForm.title.trim(),
+          message: notificationForm.message.trim(),
+          recipientIds: notificationForm.recipientIds,
+          createdBy: currentUser.id
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to send notifications');
+      }
+
+      const result = await response.json();
+      setNotificationFeedback('Notification sent successfully!');
+      setNotificationForm({
+        title: '',
+        message: '',
+        recipientIds: []
+      });
+
+      if (notificationForm.recipientIds.includes(currentUser.id)) {
+        fetchNotifications(currentUser.id);
+      }
+    } catch (error) {
+      console.error('Error sending notification:', error);
+      setNotificationFeedback(error.message || 'Failed to send notification.');
+    } finally {
+      setNotificationSending(false);
     }
   };
 
@@ -3200,6 +3370,12 @@ const DockRentalPlatform = () => {
   const [editingPropertyOwnerInfo, setEditingPropertyOwnerInfo] = useState(null);
   const [editingPropertyOwnerDates, setEditingPropertyOwnerDates] = useState(null);
 
+  useEffect(() => {
+    if (currentUser?.id) {
+      setDataInitialized(false);
+    }
+  }, [currentUser?.id]);
+
   // Load data from API on component mount - only if authenticated
   useEffect(() => {
     // If session is still loading, wait
@@ -3210,12 +3386,13 @@ const DockRentalPlatform = () => {
     // If user is not authenticated, set loading to false and return
     if (!currentUser) {
       setSlipsLoading(false);
+      setDataInitialized(false);
       return;
     }
     
-    // Clear old localStorage to prevent conflicts
-    localStorage.removeItem('dockSlipsData');
-    localStorage.removeItem('dockSlipImages');
+    if (dataInitialized) {
+      return;
+    }
     
     const loadData = async () => {
       try {
@@ -3320,6 +3497,7 @@ const DockRentalPlatform = () => {
         setSlips([]);
         // Don't show alert - just log the error
       } finally {
+        setDataInitialized(true);
         setSlipsLoading(false);
       }
     };
@@ -3330,7 +3508,7 @@ const DockRentalPlatform = () => {
     } else {
       setSlipsLoading(false);
     }
-  }, [currentUser, sessionLoading]);
+  }, [currentUser, sessionLoading, dataInitialized]);
 
 
   useEffect(() => {
@@ -3475,9 +3653,9 @@ const DockRentalPlatform = () => {
                 onClick={() => setCurrentView('notifications')}
                 className={`px-3 py-2 rounded-md ${currentView === 'notifications' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
               >
-                📧 Notifications {notifications.length > 0 && (
+                📧 Notifications {unreadNotificationsCount > 0 && (
                   <span className="bg-red-500 text-white rounded-full px-2 py-1 text-xs ml-1">
-                    {notifications.length}
+                    {unreadNotificationsCount}
                   </span>
                 )}
               </button>
@@ -3568,7 +3746,7 @@ const DockRentalPlatform = () => {
               {/* Date Range Filter */}
               <div className="mb-4 p-4 bg-gray-50 rounded-lg">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Filter by Date Range (Optional)
+                Filter by Date Range
                 </label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
@@ -3985,6 +4163,9 @@ const DockRentalPlatform = () => {
                             Boat: {booking.boatMakeModel || 'N/A'} {booking.boatLength ? `(${booking.boatLength}ft)` : ''}
                           </p>
                           <p className="text-sm text-gray-500">Type: {booking.userType === 'homeowner' ? 'Property Owner' : booking.userType || 'Renter'}</p>
+                          <p className="text-sm text-gray-500">
+                            Payment: {getPaymentStatusLabel(booking.paymentStatus)}
+                          </p>
                         </div>
                         <div className="text-right">
                           <span className={`px-3 py-1 rounded-full text-sm font-medium ${
@@ -4165,7 +4346,236 @@ const DockRentalPlatform = () => {
             )}
           </div>
         )}
-        {currentView === 'notifications' && <div>Notifications Coming Soon...</div>}
+        {currentView === 'notifications' && (
+          <div className="bg-white rounded-lg shadow-sm p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Notifications</h2>
+                <p className="text-sm text-gray-600">
+                  Stay up to date with Dock82 announcements and important updates.
+                </p>
+              </div>
+              {adminMode && (
+                <button
+                  onClick={() => {
+                    if (allUsers.length === 0) {
+                      loadAllUsers();
+                    }
+                  }}
+                  className="px-3 py-2 text-sm text-blue-600 hover:text-blue-700"
+                >
+                  Refresh recipient list
+                </button>
+              )}
+            </div>
+
+            {adminMode && (
+              <div className="mb-8 border border-blue-100 rounded-lg p-6 bg-blue-50/40">
+                <h3 className="text-lg font-semibold text-blue-900 mb-4">Send Notification</h3>
+                <form onSubmit={handleSendNotification} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Title
+                    </label>
+                    <input
+                      type="text"
+                      value={notificationForm.title}
+                      onChange={(e) => setNotificationForm({ ...notificationForm, title: e.target.value })}
+                      className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      placeholder="Maintenance update, Dock closure, etc."
+                      maxLength={120}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Message
+                    </label>
+                    <textarea
+                      value={notificationForm.message}
+                      onChange={(e) => setNotificationForm({ ...notificationForm, message: e.target.value })}
+                      className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      rows={4}
+                      placeholder="Share important details for selected members."
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Recipients
+                    </label>
+                    <div className="max-h-48 overflow-y-auto border border-gray-300 rounded-md divide-y divide-gray-200">
+                      {allUsers.map((user) => {
+                        const isChecked = notificationForm.recipientIds.includes(user.id);
+                        return (
+                          <label
+                            key={user.id}
+                            className="flex items-center justify-between px-3 py-2 hover:bg-gray-50"
+                          >
+                            <div className="flex items-center space-x-3">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  setNotificationForm((prev) => {
+                                    const nextRecipients = e.target.checked
+                                      ? [...prev.recipientIds, user.id]
+                                      : prev.recipientIds.filter((id) => id !== user.id);
+                                    return { ...prev, recipientIds: nextRecipients };
+                                  });
+                                }}
+                              />
+                              <div>
+                                <p className="text-sm font-medium text-gray-800">
+                                  {user.name || user.email}
+                                </p>
+                                <p className="text-xs text-gray-500 uppercase tracking-wide">
+                                  {user.user_type || 'renter'}
+                                </p>
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                      {allUsers.length === 0 && (
+                        <div className="px-3 py-4 text-sm text-gray-500 text-center">
+                          No users available.
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-gray-500 mt-2">
+                      <div>
+                        <span className="font-semibold">
+                          {notificationForm.recipientIds.length}
+                        </span>{' '}
+                        recipient
+                        {notificationForm.recipientIds.length === 1 ? '' : 's'} selected
+                      </div>
+                      <div className="space-x-2">
+                        <button
+                          type="button"
+                          className="text-blue-600 hover:text-blue-700"
+                          onClick={() => {
+                            setNotificationForm((prev) => ({
+                              ...prev,
+                              recipientIds:
+                                prev.recipientIds.length === allUsers.length
+                                  ? []
+                                  : allUsers.map((user) => user.id)
+                            }));
+                          }}
+                        >
+                          {notificationForm.recipientIds.length === allUsers.length
+                            ? 'Clear all'
+                            : 'Select all'}
+                        </button>
+                        <button
+                          type="button"
+                          className="text-blue-600 hover:text-blue-700"
+                          onClick={() =>
+                            setNotificationForm((prev) => ({
+                              ...prev,
+                              recipientIds: []
+                            }))
+                          }
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  {notificationFeedback && (
+                    <div
+                      className={`p-3 rounded ${
+                        notificationFeedback.includes('success')
+                          ? 'bg-green-50 text-green-700 border border-green-200'
+                          : 'bg-red-50 text-red-700 border border-red-200'
+                      }`}
+                    >
+                      {notificationFeedback}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-end space-x-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNotificationForm({ title: '', message: '', recipientIds: [] });
+                        setNotificationFeedback(null);
+                      }}
+                      className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={notificationSending}
+                      className={`px-4 py-2 rounded-md text-white text-sm font-medium ${
+                        notificationSending ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      {notificationSending ? 'Sending...' : 'Send Notification'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Inbox</h3>
+              {notificationsLoading ? (
+                <div className="flex items-center justify-center py-12 text-gray-500">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mr-3"></div>
+                  Loading notifications...
+                </div>
+              ) : notifications.length === 0 ? (
+                <div className="text-center py-10 text-gray-500 bg-gray-50 border border-dashed border-gray-200 rounded-lg">
+                  <p>No notifications yet. We will post important updates here.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {notifications.map((notification) => (
+                    <div
+                      key={notification.id}
+                      className={`border rounded-lg p-4 transition-colors cursor-pointer ${
+                        expandedNotificationId === notification.id
+                          ? 'border-blue-200 bg-blue-50'
+                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
+                      }`}
+                      onClick={() => toggleNotificationExpansion(notification)}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-900">
+                            {notification.title || 'Notification'}
+                          </h4>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {notification.readAt ? 'Viewed' : 'New'}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs text-gray-500">
+                            {formatDateTime(notification.createdAt)}
+                          </span>
+                          <div className="text-xs text-gray-400 mt-1">
+                            from {notification.createdBy === currentUser?.id ? 'You' : 'Dock82 Admin'}
+                          </div>
+                        </div>
+                      </div>
+                      {expandedNotificationId === notification.id && (
+                        <div className="mt-3 border-t border-blue-100 pt-3">
+                          <p className="text-sm text-gray-700 whitespace-pre-line">
+                            {notification.message}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {currentView === 'admin' && adminMode && (
           <div className="bg-white rounded-lg shadow-sm p-6">
             <h2 className="text-2xl font-bold mb-6">Admin Panel</h2>

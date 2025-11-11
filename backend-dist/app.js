@@ -38,8 +38,78 @@ console.log('🔑 SUPABASE_URL:', supabaseUrl);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Determine allowed origins for CORS
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'https://localhost:3000',
+  'https://dock82.com',
+  'https://www.dock82.com',
+  'https://api.dock82.com'
+];
+
+const envAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = Array.from(new Set([...envAllowedOrigins, ...defaultAllowedOrigins]));
+
+const isLocalhostOrigin = (origin = '') => {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+};
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*') ||
+      isLocalhostOrigin(origin)
+    ) {
+      return callback(null, true);
+    }
+    console.warn(`🚫 CORS blocked origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature'],
+  credentials: true,
+  optionsSuccessStatus: 204
+};
+
+// Apply headers early so even error responses include CORS allowances
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (
+    origin &&
+    (allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*') ||
+      isLocalhostOrigin(origin))
+  ) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin && allowedOrigins.includes('*')) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (!origin && allowedOrigins.length > 0) {
+    res.header('Access-Control-Allow-Origin', allowedOrigins[0]);
+  }
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Stripe-Signature');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Health check
@@ -61,7 +131,9 @@ app.post('/api/create-payment-intent', async (req, res) => {
     const intent = await stripe.paymentIntents.create({
       amount: Math.round(amount * 100), // Convert dollars to cents
       currency,
-      automatic_payment_methods: { enabled: true },
+      capture_method: 'manual',
+      automatic_payment_methods: { enabled: false },
+      payment_method_types: ['card'],
       metadata: {
         slip_id: String(booking?.slip_id || ''),
         slip_name: String(booking?.slip_name || ''),
@@ -82,9 +154,10 @@ app.post('/api/create-payment-intent', async (req, res) => {
 
     console.log('Payment intent created:', intent.id);
     
-    res.json({ 
+    res.json({
       clientSecret: intent.client_secret,
-      paymentIntentId: intent.id 
+      paymentIntentId: intent.id,
+      captureMethod: intent.capture_method
     });
   } catch (error) {
     console.error('Payment intent creation error:', error);
@@ -634,6 +707,8 @@ function generatePaymentReceiptEmail(data) {
           </tr>
         </table>
         
+      <p><strong>Reminder:</strong> Bookings become non-refundable within seven (7) days of check-in. If you need to adjust your stay, please reach out before that window so we can assist.</p>
+
         <p>Your booking confirmation and permit will be sent shortly.</p>
         <p>If you have any questions, please contact us.</p>
       </div>
@@ -840,7 +915,10 @@ function generateBookingConfirmationEmail(data) {
           <li>Keep this permit visible in your vehicle at all times</li>
           <li>Follow all dock etiquette guidelines</li>
           <li>In case of emergency, contact dock management immediately</li>
+          <li>Bookings become non-refundable within seven (7) days of check-in. Let us know before then if your plans change.</li>
         </ul>
+
+        <p style="margin-top: 20px;"><strong>Non-Refundable Reminder:</strong> Any cancellation within seven (7) days of check-in is non-refundable. If your plans change, reply to this email before that window so we can assist.</p>
       </div>
       <div class="footer">
         <p>Best regards,<br>The Dock82 Team</p>
@@ -1520,9 +1598,28 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
       .eq('id', booking.slip_id)
       .single();
 
+    let captureResult = null;
+    if (booking.payment_reference) {
+      try {
+        const paymentIntent = await stripe.paymentIntents.retrieve(booking.payment_reference);
+        if (paymentIntent.status === 'requires_capture' || paymentIntent.status === 'processing') {
+          captureResult = await stripe.paymentIntents.capture(booking.payment_reference);
+          console.log('✅ Stripe payment captured:', captureResult?.id);
+        } else if (paymentIntent.status === 'canceled') {
+          return res.status(400).json({ error: 'Payment authorization has already been voided for this booking.' });
+        } else if (paymentIntent.status !== 'succeeded') {
+          console.warn(`⚠️ Unexpected payment intent status "${paymentIntent.status}" during approval.`);
+        }
+      } catch (stripeError) {
+        console.error('❌ Stripe capture error:', stripeError);
+        return res.status(500).json({ error: 'Failed to capture payment', details: stripeError.message });
+      }
+    }
+
     const updatePayload = {
       status: 'confirmed',
-      payment_status: booking.payment_status || 'paid',
+      payment_status: booking.payment_reference ? 'paid' : (booking.payment_status || 'paid'),
+      payment_date: booking.payment_reference ? new Date().toISOString() : booking.payment_date,
       updated_at: new Date().toISOString()
     };
 
@@ -1545,7 +1642,7 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
         .eq('id', booking.slip_id);
     }
 
-    // Send confirmation and permit emails
+    // Send confirmation, payment receipt, and permit emails
     if (booking.guest_email) {
       const emailPayload = {
         guestName: booking.guest_name,
@@ -1558,6 +1655,18 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
       };
 
       try {
+        if (captureResult || updatePayload.payment_status === 'paid') {
+          await sendEmailNotificationInternal('paymentReceipt', booking.guest_email, {
+            guestName: booking.guest_name,
+            slipName: emailPayload.slipName,
+            checkIn: booking.check_in,
+            checkOut: booking.check_out,
+            amount: Number(booking.total_cost || 0).toFixed(2),
+            paymentIntentId: booking.payment_reference,
+            paymentMethod: captureResult?.charges?.data?.[0]?.payment_method_details?.type || booking.payment_method || 'card'
+          });
+        }
+
         await sendEmailNotificationInternal('bookingConfirmation', booking.guest_email, emailPayload);
         await sendEmailNotificationInternal('permit', booking.guest_email, {
           ...emailPayload,
@@ -1601,23 +1710,50 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
       .eq('id', booking.slip_id)
       .single();
 
-    // Refund payment if possible
+    const now = new Date();
+    const checkInDate = booking.check_in ? new Date(booking.check_in) : null;
+    const daysUntilCheckIn = checkInDate
+      ? Math.ceil((checkInDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+    const withinNonRefundableWindow = typeof daysUntilCheckIn === 'number' && daysUntilCheckIn < 7;
+
     let refundResult = null;
+    let paymentStatusUpdate = booking.payment_status;
+
     if (booking.payment_reference) {
       try {
-        refundResult = await stripe.refunds.create({ payment_intent: booking.payment_reference });
-        console.log('✅ Stripe refund processed:', refundResult?.id);
+        const paymentIntent = await stripe.paymentIntents.retrieve(booking.payment_reference);
+
+        if (paymentIntent.status === 'requires_capture' || paymentIntent.status === 'processing') {
+          await stripe.paymentIntents.cancel(booking.payment_reference);
+          console.log('✅ Stripe authorization voided:', booking.payment_reference);
+          paymentStatusUpdate = 'failed';
+        } else if (paymentIntent.status === 'succeeded') {
+          if (withinNonRefundableWindow) {
+            console.log('ℹ️ Booking within 7-day non-refundable window. No refund issued.');
+            paymentStatusUpdate = 'paid';
+          } else {
+            refundResult = await stripe.refunds.create({ payment_intent: booking.payment_reference });
+            console.log('✅ Stripe refund processed:', refundResult?.id);
+            paymentStatusUpdate = 'refunded';
+          }
+        } else if (paymentIntent.status === 'canceled') {
+          paymentStatusUpdate = 'failed';
+        } else {
+          console.warn(`⚠️ Unhandled payment intent status during cancellation: ${paymentIntent.status}`);
+        }
       } catch (refundError) {
-        console.error('❌ Stripe refund error:', refundError);
-        return res.status(500).json({ error: 'Failed to process refund', details: refundError.message });
+        console.error('❌ Stripe refund/void error:', refundError);
+        return res.status(500).json({ error: 'Failed to adjust payment authorization', details: refundError.message });
       }
     }
 
     const updatePayload = {
       status: 'cancelled',
-      payment_status: booking.payment_reference ? 'refunded' : booking.payment_status,
+      payment_status: paymentStatusUpdate,
       canceled_at: new Date().toISOString(),
-      cancellation_reason: reason || 'Cancelled by admin'
+      cancellation_reason: reason || 'Cancelled by admin',
+      payment_date: paymentStatusUpdate === 'paid' ? booking.payment_date : (paymentStatusUpdate === 'refunded' ? new Date().toISOString() : booking.payment_date)
     };
 
     const { data: updatedBooking, error: updateError } = await supabaseAdmin
@@ -1657,7 +1793,7 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
       }
     }
 
-    res.json({ success: true, booking: updatedBooking, refund: refundResult });
+    res.json({ success: true, booking: updatedBooking, refund: refundResult, nonRefundable: withinNonRefundableWindow });
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
@@ -1758,6 +1894,206 @@ app.patch('/api/slips/:id', async (req, res) => {
     res.json({ success: true, slip: updatedSlip });
   } catch (error) {
     console.error('Error in /api/slips/:id PATCH:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.post('/api/notifications', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { title, message, recipientIds, createdBy } = req.body || {};
+
+    if (!title || !message) {
+      return res.status(400).json({ error: 'Title and message are required' });
+    }
+
+    if (!Array.isArray(recipientIds) || recipientIds.length === 0) {
+      return res.status(400).json({ error: 'At least one recipient is required' });
+    }
+
+    if (!createdBy) {
+      return res.status(400).json({ error: 'createdBy is required' });
+    }
+
+    const { data: creator, error: creatorError } = await supabaseAdmin
+      .from('users')
+      .select('id, user_type')
+      .eq('id', createdBy)
+      .single();
+
+    if (creatorError || !creator) {
+      return res.status(404).json({ error: 'Creator not found' });
+    }
+
+    const creatorRole = (creator.user_type || '').toLowerCase();
+    if (!['admin', 'superadmin'].includes(creatorRole)) {
+      return res.status(403).json({ error: 'Only admin or superadmin can create notifications' });
+    }
+
+    const uniqueRecipientIds = Array.from(new Set(recipientIds)).filter(Boolean);
+    if (uniqueRecipientIds.length === 0) {
+      return res.status(400).json({ error: 'No valid recipients found' });
+    }
+
+    const notificationRows = uniqueRecipientIds.map((recipientId) => ({
+      recipient_user_id: recipientId,
+      title,
+      message,
+      created_by: createdBy
+    }));
+
+    const { data: inserted, error: insertError } = await supabaseAdmin
+      .from('notifications')
+      .insert(notificationRows)
+      .select('id, title, message, recipient_user_id, created_at, created_by');
+
+    if (insertError) {
+      console.error('Error inserting notifications:', insertError);
+      return res.status(500).json({ error: 'Failed to create notifications', details: insertError.message });
+    }
+
+    res.json({ success: true, notifications: inserted });
+  } catch (error) {
+    console.error('Error creating notifications:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.get('/api/notifications', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { user_id: userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'user_id query parameter is required' });
+    }
+
+    const { data: notifications, error } = await supabaseAdmin
+      .from('notifications')
+      .select('id, title, message, recipient_user_id, created_at, read_at, created_by')
+      .eq('recipient_user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching notifications:', error);
+      return res.status(500).json({ error: 'Failed to fetch notifications', details: error.message });
+    }
+
+    res.json({ success: true, notifications: notifications || [] });
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.patch('/api/notifications/:id/read', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res
+        .status(500)
+        .json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { id } = req.params;
+    const { userId } = req.body || {};
+
+    if (!id || !userId) {
+      return res.status(400).json({ error: 'Notification ID and userId are required' });
+    }
+
+    const { data: notification, error: fetchError } = await supabaseAdmin
+      .from('notifications')
+      .select('id, recipient_user_id, read_at')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !notification) {
+      return res
+        .status(404)
+        .json({ error: 'Notification not found', details: fetchError?.message });
+    }
+
+    if (notification.recipient_user_id !== userId) {
+      return res.status(403).json({ error: 'Not authorized to update this notification' });
+    }
+
+    if (notification.read_at) {
+      return res.json({
+        success: true,
+        notification: { id: notification.id, read_at: notification.read_at }
+      });
+    }
+
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from('notifications')
+      .update({ read_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('id, read_at')
+      .single();
+
+    if (updateError) {
+      console.error('Error updating notification read state:', updateError);
+      return res
+        .status(500)
+        .json({ error: 'Failed to update notification', details: updateError.message });
+    }
+
+    res.json({ success: true, notification: updated });
+  } catch (error) {
+    console.error('Error marking notification as read:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { data: users, error } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, user_type')
+      .order('name');
+
+    if (error) {
+      console.error('Error fetching users:', error);
+      return res.status(500).json({ error: 'Failed to fetch users', details: error.message });
+    }
+
+    res.json({ success: true, users: users || [] });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.get('/api/admin/admins', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { data: admins, error } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, user_type')
+      .in('user_type', ['admin', 'superadmin'])
+      .order('name');
+
+    if (error) {
+      console.error('Error fetching admins:', error);
+      return res.status(500).json({ error: 'Failed to fetch admins', details: error.message });
+    }
+
+    res.json({ success: true, admins: admins || [] });
+  } catch (error) {
+    console.error('Error fetching admins:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });

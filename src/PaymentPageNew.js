@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { loadStripe } from '@stripe/stripe-js';
-import { Elements, PaymentElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
 import { supabase } from './supabase';
 
 const stripePromise = loadStripe(
@@ -8,7 +8,7 @@ const stripePromise = loadStripe(
 );
 
 // Inner component that uses Stripe hooks
-const PaymentFormContent = ({ bookingData, onPaymentComplete }) => {
+const PaymentFormContent = ({ bookingData, onPaymentComplete, clientSecret }) => {
   const stripe = useStripe();
   const elements = useElements();
   const [paymentProcessing, setPaymentProcessing] = useState(false);
@@ -21,42 +21,97 @@ const PaymentFormContent = ({ bookingData, onPaymentComplete }) => {
     setPaymentProcessing(true);
     setPaymentError(null);
 
-    const { error, paymentIntent } = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: `${window.location.origin}/payment-success`,
-      },
-      redirect: 'if_required',
-    });
+    try {
+      const cardElement = elements.getElement(CardElement);
+      if (!cardElement) {
+        setPaymentError('Unable to load the card form. Please refresh and try again.');
+        return;
+      }
 
-    if (error) {
-      setPaymentError(error.message);
-      setPaymentProcessing(false);
-    } else if (paymentIntent?.status === 'succeeded') {
-      onPaymentComplete({
+      const { error, paymentIntent } = await stripe.confirmCardPayment(
+        clientSecret,
+        {
+          payment_method: {
+            card: cardElement,
+            billing_details: {
+              name: bookingData.guestName,
+              email: bookingData.guestEmail,
+              phone: bookingData.guestPhone,
+            },
+          },
+        },
+        {
+          handleActions: true,
+        }
+      );
+
+      if (error) {
+        console.error('Stripe confirmCardPayment error:', error);
+        setPaymentError(error.message || 'Authorization failed. Please try again.');
+        return;
+      }
+
+      if (!paymentIntent) {
+        console.error('Stripe confirmCardPayment returned no paymentIntent');
+        setPaymentError('Payment could not be completed. Please try again.');
+        return;
+      }
+
+      console.log(
+        'Stripe payment intent result:',
+        paymentIntent.id,
+        paymentIntent.status,
+        paymentIntent.next_action
+      );
+
+      const successfulStatuses = ['succeeded', 'requires_capture', 'processing'];
+      if (!successfulStatuses.includes(paymentIntent.status)) {
+        console.warn('Unexpected payment intent status:', paymentIntent);
+        setPaymentError(`Unexpected payment status: ${paymentIntent.status}`);
+        return;
+      }
+
+      await onPaymentComplete({
         paymentIntentId: paymentIntent.id,
         amount: paymentIntent.amount / 100,
         status: paymentIntent.status,
       });
+    } catch (submitError) {
+      console.error('Payment confirmation error:', submitError);
+      setPaymentError(submitError.message || 'Payment authorization failed. Please try again.');
+    } finally {
+      setPaymentProcessing(false);
     }
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div className="p-4 bg-blue-50 border-2 border-blue-300 rounded-lg">
-        <h3 className="text-lg font-bold text-gray-900 mb-4">💳 Payment Information</h3>
-        <div className="bg-white p-4 rounded border">
-          <PaymentElement 
-            options={{
-              layout: 'tabs',
-              defaultValues: {
-                billingDetails: {
-                  name: bookingData.guestName,
-                  email: bookingData.guestEmail,
-                }
-              }
-            }}
-          />
+        <h3 className="text-lg font-bold text-gray-900 mb-4">💳 Card Authorization</h3>
+        <div className="bg-white p-5 rounded border border-blue-200 shadow-sm">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Card Details
+          </label>
+          <div className="p-3 rounded border border-gray-200 bg-gray-50">
+            <CardElement
+              options={{
+                style: {
+                  base: {
+                    fontSize: '16px',
+                    color: '#1f2937',
+                    '::placeholder': { color: '#9ca3af' },
+                  },
+                  invalid: {
+                    color: '#dc2626',
+                  },
+                },
+              }}
+            />
+          </div>
+          <p className="mt-3 text-xs text-gray-500">
+            Use Stripe test cards such as <strong>4242 4242 4242 4242</strong> with any future expiration,
+            a random CVC, and ZIP 12345.
+          </p>
         </div>
       </div>
 
@@ -75,7 +130,7 @@ const PaymentFormContent = ({ bookingData, onPaymentComplete }) => {
             : 'bg-green-500 hover:bg-green-600 text-white'
         }`}
       >
-        {paymentProcessing ? 'Processing...' : '💳 Complete Payment & Book Slip'}
+        {paymentProcessing ? 'Processing...' : '💳 Authorize Payment Request'}
       </button>
     </form>
   );
@@ -174,10 +229,23 @@ const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack }) =
               </div>
             </div>
           </div>
+
+          <div className="bg-white rounded-lg shadow-sm p-6 mb-6 border border-blue-100">
+            <h2 className="text-lg font-semibold text-blue-900 mb-3">Payment & Refund Policy</h2>
+            <ul className="list-disc pl-6 space-y-2 text-sm text-gray-700">
+              <li>Your card will be authorized today, but funds are only captured after dock management approves the reservation.</li>
+              <li>If your request is declined, the authorization is voided automatically—no charges or refunds needed.</li>
+              <li>Bookings become <strong>non-refundable</strong> within seven (7) days of check-in. Earlier cancellations receive a full refund automatically via Stripe.</li>
+            </ul>
+          </div>
         </div>
 
         <Elements stripe={stripePromise} options={{ clientSecret }}>
-          <PaymentFormContent bookingData={bookingData} onPaymentComplete={onPaymentComplete} />
+          <PaymentFormContent
+            bookingData={bookingData}
+            onPaymentComplete={onPaymentComplete}
+            clientSecret={clientSecret}
+          />
         </Elements>
       </div>
     </div>
