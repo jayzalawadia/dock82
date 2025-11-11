@@ -122,7 +122,10 @@ const DockRentalPlatform = () => {
     password: '', 
     confirmPassword: '',
     phone: '',
-    userType: 'renter'
+    userType: 'renter',
+    propertyAddress: '',
+    parcelNumber: '',
+    emergencyContact: ''
   });
   const [userBookings, setUserBookings] = useState([]);
   const updateUserBookingsFromList = useCallback(
@@ -267,41 +270,24 @@ const DockRentalPlatform = () => {
   });
 
   // Property owners data from the spreadsheet
-  const propertyOwners = [
-    { name: "Jaime Puerto & Carolina Sendon", address: "9486 Alborado Road LGI", parcel: "422022326010", email: "asalvador@sunshinewindows.com" },
-    { name: "Don & Kathleen Eves", address: "9488 Aborado Road LGI", parcel: "422022328008", email: "" },
-    { name: "Tillis & Sons, Inc.", address: "9490 Alborado Road LGI", parcel: "442022326011", email: "jtillis3@tampabay.rr.com" },
-    { name: "David Groom", address: "9492 Alborado Road LGI", parcel: "422022328009", email: "groom2@comcast.net" },
-    { name: "Michael & Ann Simon", address: "9494 Alborado Road LGI", parcel: "442022326012", email: "mjsimon412@gmail.com" },
-    { name: "Paul & Barbara Holmes", address: "9496 Alborado Road LGI", parcel: "422022328010", email: "paulholmes@ewol.com" },
-    { name: "Richard Novak", address: "9498 Alborado Road LGI", parcel: "442022376001", email: "rmnovak@uic.edu" },
-    { name: "Randall & Stormy Jackson", address: "9502 Alborado Road LGI", parcel: "442022376002", email: "" },
-    { name: "Bruce & Roxanne McVay", address: "9506 Don Jose Court LGI", parcel: "422022328020", email: "rnmcvay@aol.com" },
-    { name: "Richard & Patricia Walldov", address: "9508 Don Jose Court LGI", parcel: "422022402005", email: "" },
-    { name: "Alan Granburg and Melissa Thompson", address: "9510 Don Jose Court LGI", parcel: "422022328019", email: "mthompson03255@gmail.com" },
-    { name: "Donald & Jacqueline Scattergood", address: "9512 Don Jose Court LGI", parcel: "422022329009", email: "dscattergood@gmail.com" },
-    { name: "Linda Plumlee & P M Parrish", address: "9514 Don Jose Court LGI", parcel: "422022328018", email: "" },
-    { name: "Jack Cleghorn", address: "9516 Don Jose Court LGI", parcel: "422022329008", email: "jtclecghorn@comcast.net" },
-    { name: "Ron & Gena Moore", address: "9576 Almirate Court LGI", parcel: "422022402002", email: "moorecars@gmail.com" },
-    { name: "Tom & Vivian McFarland", address: "9580 Almirate Court LGI", parcel: "422022402003", email: "tomandvivian@gmail.com" },
-    { name: "Bronest & Judith York", address: "9582 Almirate Court LGI", parcel: "422022403009", email: "" },
-    { name: "Glen & Heather Taylor", address: "9584 & 9586 Almirate Court LGI", parcel: "422022402004", email: "glen@centriclearning.net" },
-    { name: "George & Jennifer Schaffer", address: "9585 Almirate Court LGI", parcel: "", email: "" },
-    { name: "Dorothy T Cleghorn W.W. Coyner", address: "9650 Don Jose Court LGI", parcel: "422022403020", email: "jtclecghorn@comcast.net" },
-    { name: "Little Gasparilla Water Utility, Inc.", address: "9652 Privateer Road LGI", parcel: "422022403018", email: "" },
-    { name: "Eric & Mary Ellen Gonzales", address: "9654 Privateer Road LGI", parcel: "422022403021", email: "marygonzales058@gmail.com" },
-    { name: "Chris & Heather Mariscal", address: "9656 Privateer Road LGI", parcel: "422022403022", email: "heathergmariscal@gmail.com" },
-    { name: "Robert W. Brown & Rosemary B Eure", address: "9660 Privateer Road LGI", parcel: "422022406001", email: "rosemarye@lancasterlawyers.com" },
-    { name: "James & Shelly Connell", address: "9662 Privateer Road LGI", parcel: "422022406002", email: "" },
-    { name: "Barry and Kaye Hurt", address: "9666 Privateer Road LGI", parcel: "422022406004", email: "bhurt@tampabay.rr.com" },
-    { name: "John & Cindy Tillis", address: "9668 Privateer Road LGI", parcel: "422022406005", email: "jtillis3@tampabay.rr.com" },
-    { name: "Robert & Lilliam Hoerr", address: "9672 Privateer Road LGI", parcel: "422022406007", email: "bobhoerr@comcast.net" },
-    { name: "George & Sue Paskert", address: "9674 Privateer Road LGI", parcel: "422022406008", email: "gpaskert@aol.com" },
-    { name: "Roy & Claudia Tillett", address: "9678 Privateer Road LGI", parcel: "422022406010", email: "" },
-    { name: "Donald & Mary Lee Kennefick", address: "9682 Privateer Road LGI", parcel: "422022406020", email: "kennefick6@comcast.net" },
-    { name: "Don Reynolds", address: "9684 Privateer Road LGI", parcel: "422022330004", email: "apexmortgagrebrokers@gmail.com" },
-    { name: "Faris and Penny Jahna", address: "9686 Privateer Road LGI", parcel: "422022330003", email: "faris1@hotmail.com" }
-  ];
+  const [propertyOwners, setPropertyOwners] = useState([]);
+  const [propertyOwnersLoading, setPropertyOwnersLoading] = useState(false);
+  const [propertyOwnersError, setPropertyOwnersError] = useState(null);
+  const [homeownerVerificationOpen, setHomeownerVerificationOpen] = useState(false);
+  const [homeownerVerificationData, setHomeownerVerificationData] = useState({
+    propertyAddress: '',
+    parcelNumber: ''
+  });
+  const [homeownerVerificationSubmitting, setHomeownerVerificationSubmitting] = useState(false);
+  const homeownerAddressOptions = useMemo(() => {
+    const unique = new Set();
+    (propertyOwners || []).forEach((owner) => {
+      if (owner?.property_address) {
+        unique.add(owner.property_address);
+      }
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [propertyOwners]);
 
   // Slips data loaded from Supabase only
   const normalizeUserType = (value) => {
@@ -864,6 +850,34 @@ const DockRentalPlatform = () => {
       loadAllUsers();
     }
   }, [currentView, adminMode, allUsers.length]);
+
+  useEffect(() => {
+    fetchHomeownerRecords();
+  }, [fetchHomeownerRecords]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setHomeownerVerificationOpen(false);
+      return;
+    }
+
+    const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
+    if (userType === 'homeowner') {
+      const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
+      if (homeownerStatus !== 'verified') {
+        setHomeownerVerificationData({
+          propertyAddress: currentUser.property_address || currentUser.propertyAddress || '',
+          parcelNumber: currentUser.parcel_number || currentUser.parcelNumber || ''
+        });
+        setHomeownerVerificationOpen(true);
+        fetchHomeownerRecords();
+      } else {
+        setHomeownerVerificationOpen(false);
+      }
+    } else {
+      setHomeownerVerificationOpen(false);
+    }
+  }, [currentUser, fetchHomeownerRecords]);
 
   // Re-transform bookings when slips are loaded to add slipName
   useEffect(() => {
@@ -1794,10 +1808,10 @@ const DockRentalPlatform = () => {
       }
 
       // Filter by price range
-      if (searchFilters.priceRange) {
-        const [min, max] = searchFilters.priceRange.split('-').map(Number);
-        if (slip.price_per_night < min || slip.price_per_night > max) return false;
-      }
+    if (searchFilters.priceRange) {
+      const [min, max] = searchFilters.priceRange.split('-').map(Number);
+      if (slip.price_per_night < min || slip.price_per_night > max) return false;
+    }
 
       // Filter by date range availability
       if (searchFilters.dateRangeStart && searchFilters.dateRangeEnd) {
@@ -1806,7 +1820,7 @@ const DockRentalPlatform = () => {
         }
       }
 
-      return true;
+    return true;
     })
   );
 
@@ -2396,12 +2410,41 @@ const DockRentalPlatform = () => {
     
     try {
       console.log('AUTH DEBUG - Attempting Supabase Auth signup');
+
+      if (registerData.userType === 'homeowner') {
+        if (!registerData.propertyAddress || !registerData.parcelNumber) {
+          alert('Homeowners must select their property address and enter the parcel number before continuing.');
+          return;
+        }
+
+        const normalizedAddress = registerData.propertyAddress.trim().toLowerCase();
+        const normalizedParcel = registerData.parcelNumber.trim();
+
+        if (propertyOwners.length) {
+          const matchingOwner = propertyOwners.find(
+            (owner) => (owner.property_address || '').trim().toLowerCase() === normalizedAddress
+          );
+
+          if (!matchingOwner) {
+            alert('The selected property address is not recognized. Please contact Dock82 support for assistance.');
+            return;
+          }
+
+          const recordedParcel = (matchingOwner.parcel_number || '').trim();
+          if (recordedParcel && recordedParcel !== normalizedParcel) {
+            alert('The parcel number does not match our records. Please verify and try again or contact support.');
+            return;
+          }
+        }
+      }
       
       // Register user via our API endpoint (bypasses Supabase email rate limits)
       // Uses Admin API to create user and Resend for emails (same as booking receipts)
       console.log('AUTH DEBUG - Registering user via API (bypassing Supabase email rate limits)...');
       
       const localApiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+      const propertyAddressPayload = registerData.propertyAddress ? registerData.propertyAddress.trim() : '';
+      const parcelNumberPayload = registerData.parcelNumber ? registerData.parcelNumber.trim() : '';
       
       // Check if server is running and has the endpoint
       let registerResponse;
@@ -2417,7 +2460,8 @@ const DockRentalPlatform = () => {
             name: registerData.name,
             phone: registerData.phone,
             userType: registerData.userType ? registerData.userType.toLowerCase() : 'renter',
-            propertyAddress: registerData.propertyAddress,
+            propertyAddress: propertyAddressPayload,
+            parcelNumber: parcelNumberPayload,
             emergencyContact: registerData.emergencyContact
           })
         });
@@ -2472,7 +2516,7 @@ const DockRentalPlatform = () => {
           // Close registration modal and show login form
           setShowLoginModal(true);
           setAuthStep('login');
-          setRegisterData({ email: '', password: '', name: '', phone: '', userType: 'renter' });
+          setRegisterData({ email: '', password: '', name: '', phone: '', userType: 'renter', propertyAddress: '', parcelNumber: '', emergencyContact: '', confirmPassword: '' });
           return;
         }
         
@@ -2669,6 +2713,7 @@ const DockRentalPlatform = () => {
           phone: '',
           userType: 'renter',
           propertyAddress: '',
+          parcelNumber: '',
           emergencyContact: ''
         });
         setAuthStep('login');
@@ -2687,6 +2732,7 @@ const DockRentalPlatform = () => {
           phone: '',
           userType: 'renter',
           propertyAddress: '',
+          parcelNumber: '',
           emergencyContact: ''
         });
         setAuthStep('login');
@@ -2846,12 +2892,38 @@ const DockRentalPlatform = () => {
       const response = await fetch(`${API_BASE_URL}/api/admin/users`);
       if (response.ok) {
         const data = await response.json();
-        setAllUsers(data.users || []);
+        const usersList = data.users || [];
+        setAllUsers(usersList);
+        const homeownersFromUsers = usersList.filter(
+          (user) => normalizeUserType(user.user_type || user.userType || user.user_role) === 'homeowner'
+        );
+        if (homeownersFromUsers.length) {
+          setPropertyOwners(homeownersFromUsers);
+        }
       }
     } catch (error) {
       console.error('Error loading users:', error);
     }
   };
+
+  const fetchHomeownerRecords = useCallback(async () => {
+    setPropertyOwnersLoading(true);
+    setPropertyOwnersError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/homeowners/records`);
+      if (!response.ok) {
+        throw new Error('Failed to load homeowner records');
+      }
+      const data = await response.json();
+      setPropertyOwners(data.homeowners || []);
+    } catch (error) {
+      console.error('Error loading homeowner records:', error);
+      setPropertyOwners([]);
+      setPropertyOwnersError(error.message || 'Failed to load homeowner records');
+    } finally {
+      setPropertyOwnersLoading(false);
+    }
+  }, [API_BASE_URL]);
 
   const loadAllAdmins = async () => {
     try {
@@ -2862,6 +2934,75 @@ const DockRentalPlatform = () => {
       }
     } catch (error) {
       console.error('Error loading admins:', error);
+    }
+  };
+
+  const handleSubmitHomeownerVerification = async (event) => {
+    event.preventDefault();
+    if (!currentUser) return;
+
+    const propertyAddressValue = (homeownerVerificationData.propertyAddress || '').trim();
+    const parcelNumberValue = (homeownerVerificationData.parcelNumber || '').trim();
+
+    if (!propertyAddressValue || !parcelNumberValue) {
+      alert('Please select your property address and enter the parcel number to continue.');
+      return;
+    }
+
+    if (propertyOwners.length) {
+      const matchingOwner = propertyOwners.find(
+        (owner) => (owner.property_address || '').trim().toLowerCase() === propertyAddressValue.toLowerCase()
+      );
+
+      if (!matchingOwner) {
+        alert('The selected property address is not recognized. Please contact Dock82 support for assistance.');
+        return;
+      }
+
+      const recordedParcel = (matchingOwner.parcel_number || '').trim();
+      if (recordedParcel && recordedParcel !== parcelNumberValue) {
+        alert('The parcel number does not match our records. Please verify and try again or contact support.');
+        return;
+      }
+    }
+
+    setHomeownerVerificationSubmitting(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/homeowners/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: currentUser.email,
+          parcelNumber: parcelNumberValue,
+          propertyAddress: propertyAddressValue
+        })
+      });
+
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || 'Failed to verify homeowner information.');
+      }
+
+      if (result.user) {
+        setCurrentUser((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            ...result.user,
+            user_type: normalizeUserType(result.user.user_type || result.user.userType || prev.user_type)
+          };
+        });
+      }
+
+      alert('✅ Homeowner information verified. Your account is now active.');
+      setHomeownerVerificationOpen(false);
+      fetchHomeownerRecords();
+    } catch (error) {
+      console.error('Error verifying homeowner:', error);
+      alert(error.message || 'Failed to verify homeowner. Please try again or contact support.');
+    } finally {
+      setHomeownerVerificationSubmitting(false);
     }
   };
 
@@ -5309,7 +5450,7 @@ const DockRentalPlatform = () => {
                             alt="Slip preview"
                             className="h-24 w-24 rounded object-cover shadow"
                           />
-                          <button
+                  <button
                             type="button"
                             className="mt-2 text-xs text-red-600 underline"
                             onClick={() => {
@@ -5324,10 +5465,10 @@ const DockRentalPlatform = () => {
                             }}
                           >
                             Remove image
-                          </button>
+                  </button>
                         </div>
                       )}
-                    </div>
+                </div>
 
                       <div className="flex flex-wrap items-center gap-3">
                       <button
@@ -5371,18 +5512,18 @@ const DockRentalPlatform = () => {
                         <div className="flex items-center space-x-2">
                           <span className={`px-2 py-1 rounded text-xs ${slip.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                             {slip.available ? 'Active' : 'Inactive'}
-                        </span>
-                          <button
-                            onClick={() => handleToggleSlipAvailability(slip)}
+                          </span>
+                        <button
+                          onClick={() => handleToggleSlipAvailability(slip)}
                             className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                              slip.available
-                                ? 'bg-red-600 text-white hover:bg-red-700'
-                                : 'bg-green-600 text-white hover:bg-green-700'
-                            }`}
-                          >
-                            {slip.available ? 'Deactivate' : 'Activate'}
-                          </button>
-                        </div>
+                            slip.available 
+                              ? 'bg-red-600 text-white hover:bg-red-700' 
+                              : 'bg-green-600 text-white hover:bg-green-700'
+                          }`}
+                        >
+                          {slip.available ? 'Deactivate' : 'Activate'}
+                        </button>
+                      </div>
                       </div>
                       
                       {/* Description Editing */}
@@ -5504,7 +5645,7 @@ const DockRentalPlatform = () => {
                                 alt={`${slip.name} preview`}
                                 className="w-full h-24 object-cover rounded border"
                               />
-                    </div>
+                  </div>
                           ) : null}
                           <input
                             key={`slip-image-input-${slip.id}`}
@@ -5516,35 +5657,35 @@ const DockRentalPlatform = () => {
                           {imageUploadError && (
                             <p className="text-xs text-red-600">{imageUploadError}</p>
                           )}
-                          <div className="flex space-x-2">
-                            <button
+                            <div className="flex space-x-2">
+                              <button
                               onClick={handleSaveImage}
                               disabled={isUploading}
                               className={`px-3 py-1 rounded text-sm text-white ${isUploading ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-700'}`}
-                            >
+                              >
                               {isUploading ? 'Saving...' : 'Save Image'}
-                            </button>
-                            <button
-                              onClick={handleCancelEdit}
-                              className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
-                            >
-                              Cancel
-                            </button>
-                </div>
-                  </div>
-                      ) : (
+                              </button>
+                              <button
+                                onClick={handleCancelEdit}
+                                className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
                         <div className="mt-2">
-                          <button
+                            <button
                             onClick={() => handleStartImageEdit(slip)}
                             className="px-3 py-1 bg-orange-600 text-white rounded text-sm hover:bg-orange-700"
-                          >
+                            >
                             {slip.images && slip.images.length ? 'Change Image' : 'Add Image'}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
 
                 {/* Dock Etiquette Management */}
                 <div className="mt-8">
@@ -5561,22 +5702,22 @@ const DockRentalPlatform = () => {
                   <div className="space-y-4">
                     <div className="flex flex-wrap gap-2">
                       <span className="text-sm font-medium text-blue-800 mr-1">Quick Etiquette Templates:</span>
-                      <button
-                        onClick={() => {
-                          const standardRules = "• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required";
+                        <button
+                          onClick={() => {
+                            const standardRules = "• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required";
                           setCommonEtiquette(standardRules);
-                        }}
-                        className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
-                      >
+                          }}
+                          className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
+                        >
                         Standard
-                      </button>
-                      <button
-                        onClick={() => {
-                          const familyRules = "• Family-friendly environment\n• Respect quiet hours (9 PM - 8 AM)\n• Supervise children at all times\n• Keep slip area clean and organized\n• Follow all safety protocols\n• No pets without permission\n• Proper waste disposal required";
+                        </button>
+                        <button
+                          onClick={() => {
+                            const familyRules = "• Family-friendly environment\n• Respect quiet hours (9 PM - 8 AM)\n• Supervise children at all times\n• Keep slip area clean and organized\n• Follow all safety protocols\n• No pets without permission\n• Proper waste disposal required";
                           setCommonEtiquette(familyRules);
-                        }}
-                        className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200"
-                      >
+                          }}
+                          className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200"
+                        >
                         Family-Friendly
                       </button>
                       <button
@@ -5587,8 +5728,8 @@ const DockRentalPlatform = () => {
                         className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded hover:bg-purple-200"
                       >
                         Premium
-                      </button>
-                    </div>
+                        </button>
+                      </div>
 
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Dock Etiquette Rules</label>
@@ -5615,39 +5756,9 @@ const DockRentalPlatform = () => {
                       >
                         Clear
                       </button>
-                    </div>
+                  </div>
                   </div>
 
-                  {/* Quick Etiquette Templates */}
-                  <div className="mt-6 bg-gray-50 p-4 rounded-lg">
-                    <h4 className="font-semibold mb-3">Quick Etiquette Templates</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="bg-white p-3 rounded border">
-                        <h5 className="font-medium text-sm mb-2">Standard Rules</h5>
-                        <button
-                          onClick={() => {
-                            const standardRules = "• Respect quiet hours (10 PM - 7 AM)\n• Keep slip area clean and organized\n• Follow all safety protocols\n• Notify management of any issues\n• No loud music or parties\n• Proper waste disposal required";
-                            setCommonEtiquette(standardRules);
-                          }}
-                          className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
-                        >
-                          Use Standard Rules
-                        </button>
-                      </div>
-                      <div className="bg-white p-3 rounded border">
-                        <h5 className="font-medium text-sm mb-2">Family-Friendly Rules</h5>
-                        <button
-                          onClick={() => {
-                            const familyRules = "• Family-friendly environment\n• Respect quiet hours (9 PM - 8 AM)\n• Supervise children at all times\n• Keep slip area clean and organized\n• Follow all safety protocols\n• No pets without permission\n• Proper waste disposal required";
-                            setCommonEtiquette(familyRules);
-                          }}
-                          className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200"
-                        >
-                          Use Family Rules
-                        </button>
-                      </div>
-                    </div>
-                  </div>
                 </div>
               </div>
             )}
@@ -5690,15 +5801,15 @@ const DockRentalPlatform = () => {
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
                           {propertyOwners.map((owner, index) => (
-                            <tr key={index} className="hover:bg-gray-50">
+                            <tr key={owner.id || owner.email || index} className="hover:bg-gray-50">
                               <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                {owner.name}
+                                {owner.name || owner.email || 'Unnamed Owner'}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                {owner.address}
+                                {owner.property_address || 'N/A'}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                {owner.parcel || 'N/A'}
+                                {owner.parcel_number || 'N/A'}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                 {owner.email ? (
@@ -5710,9 +5821,19 @@ const DockRentalPlatform = () => {
                                 )}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap">
-                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                                  Active Owner
-                                </span>
+                                {owner.homeowner_status === 'verified' ? (
+                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                    Verified
+                                  </span>
+                                ) : owner.homeowner_status === 'pending_verification' ? (
+                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
+                                    Pending Verification
+                                  </span>
+                                ) : (
+                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                                    {owner.homeowner_status ? owner.homeowner_status : 'Unknown'}
+                                  </span>
+                                )}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                 {superAdminMode && owner.email ? (
@@ -6229,6 +6350,22 @@ const DockRentalPlatform = () => {
                     <span className="text-sm font-medium text-gray-700">User Type:</span>
                     <span className="text-sm text-gray-900 capitalize">{registerData.userType}</span>
                   </div>
+                  {registerData.userType === 'homeowner' && (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm font-medium text-gray-700">Property Address:</span>
+                        <span className="text-sm text-gray-900">
+                          {registerData.propertyAddress || 'Not selected'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm font-medium text-gray-700">Parcel Number:</span>
+                        <span className="text-sm text-gray-900">
+                          {registerData.parcelNumber || 'Not provided'}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* Additional Contact Fields for Homeowners */}
@@ -6236,12 +6373,45 @@ const DockRentalPlatform = () => {
                   <div className="space-y-3">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Property Address</label>
+                      {propertyOwnersLoading ? (
+                        <p className="text-sm text-gray-500">Loading property addresses...</p>
+                      ) : homeownerAddressOptions.length > 0 ? (
+                        <select
+                          value={registerData.propertyAddress || ''}
+                          onChange={(e) => setRegisterData({...registerData, propertyAddress: e.target.value})}
+                          className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          required
+                        >
+                          <option value="">Select your property</option>
+                          {homeownerAddressOptions.map((address) => (
+                            <option key={address} value={address}>
+                              {address}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={registerData.propertyAddress || ''}
+                          onChange={(e) => setRegisterData({...registerData, propertyAddress: e.target.value})}
+                          className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="Enter your property address"
+                          required
+                        />
+                      )}
+                      {propertyOwnersError && (
+                        <p className="text-xs text-red-600 mt-1">{propertyOwnersError}</p>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Parcel Number</label>
                       <input
                         type="text"
-                        value={registerData.propertyAddress || ''}
-                        onChange={(e) => setRegisterData({...registerData, propertyAddress: e.target.value})}
+                        value={registerData.parcelNumber || ''}
+                        onChange={(e) => setRegisterData({...registerData, parcelNumber: e.target.value})}
                         className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="Your dock slip address"
+                        placeholder="Enter the parcel number associated with your property"
+                        required
                       />
                     </div>
                     <div>
@@ -6396,6 +6566,99 @@ const DockRentalPlatform = () => {
                 </div>
               </form>
             </div>
+          </div>
+        </div>
+      )}
+
+      {homeownerVerificationOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-lg p-6 w-full max-w-xl space-y-4 shadow-xl">
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">Verify Homeowner Details</h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  Please confirm your property address and parcel number to activate your homeowner access.
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleSubmitHomeownerVerification} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Property Address</label>
+                {propertyOwnersLoading ? (
+                  <p className="text-sm text-gray-500">Loading property addresses...</p>
+                ) : homeownerAddressOptions.length > 0 ? (
+                  <select
+                    value={homeownerVerificationData.propertyAddress}
+                    onChange={(e) =>
+                      setHomeownerVerificationData((prev) => ({
+                        ...prev,
+                        propertyAddress: e.target.value
+                      }))
+                    }
+                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    required
+                  >
+                    <option value="">Select your property</option>
+                    {homeownerAddressOptions.map((address) => (
+                      <option key={address} value={address}>
+                        {address}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={homeownerVerificationData.propertyAddress}
+                    onChange={(e) =>
+                      setHomeownerVerificationData((prev) => ({
+                        ...prev,
+                        propertyAddress: e.target.value
+                      }))
+                    }
+                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Enter your property address"
+                    required
+                  />
+                )}
+                {propertyOwnersError && (
+                  <p className="text-xs text-red-600 mt-1">{propertyOwnersError}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Parcel Number</label>
+                <input
+                  type="text"
+                  value={homeownerVerificationData.parcelNumber}
+                  onChange={(e) =>
+                    setHomeownerVerificationData((prev) => ({
+                      ...prev,
+                      parcelNumber: e.target.value
+                    }))
+                  }
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter the parcel number associated with your property"
+                  required
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-sm text-gray-500 bg-blue-50 border border-blue-100 rounded-md p-3">
+                <p>Need help? Contact Dock82 support at <a href="mailto:support@dock82.com" className="text-blue-600 hover:text-blue-800">support@dock82.com</a>.</p>
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-2">
+                <button
+                  type="submit"
+                  disabled={homeownerVerificationSubmitting}
+                  className={`px-4 py-2 rounded-md text-white font-medium ${
+                    homeownerVerificationSubmitting ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {homeownerVerificationSubmitting ? 'Verifying...' : 'Verify & Continue'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -171,7 +171,16 @@ app.post('/api/create-payment-intent', async (req, res) => {
 // Register user endpoint - bypasses Supabase email rate limits by using Admin API
 app.post('/api/register-user', async (req, res) => {
   try {
-    const { email, password, name, phone, userType, propertyAddress, emergencyContact } = req.body;
+    const {
+      email,
+      password,
+      name,
+      phone,
+      userType,
+      propertyAddress,
+      parcelNumber,
+      emergencyContact
+    } = req.body;
     
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
@@ -179,6 +188,57 @@ app.post('/api/register-user', async (req, res) => {
     
     // Normalize userType to lowercase (database constraint requires lowercase)
     const normalizedUserType = userType ? userType.toLowerCase() : 'renter';
+    
+    if (normalizedUserType === 'homeowner') {
+      if (!propertyAddress || !parcelNumber) {
+        return res.status(400).json({
+          error: 'Property address and parcel number are required for homeowner registration.'
+        });
+      }
+    }
+
+    const buildProfileUpdate = (existingProfile = {}) => {
+      const updateData = {};
+
+      if (name) {
+        updateData.name = name;
+      } else if (!existingProfile.name && email) {
+        updateData.name = email.split('@')[0];
+      }
+
+      if (phone) {
+        updateData.phone = phone;
+      }
+
+      if (typeof propertyAddress === 'string' && propertyAddress.trim().length > 0) {
+        updateData.property_address = propertyAddress.trim();
+      } else if (!existingProfile.property_address && normalizedUserType === 'homeowner') {
+        updateData.property_address = '';
+      }
+
+      if (typeof parcelNumber === 'string' && parcelNumber.trim().length > 0) {
+        updateData.parcel_number = parcelNumber.trim();
+      } else if (!existingProfile.parcel_number && normalizedUserType === 'homeowner') {
+        updateData.parcel_number = '';
+      }
+
+      if (typeof emergencyContact === 'string' && emergencyContact.trim().length > 0) {
+        updateData.emergency_contact = emergencyContact.trim();
+      }
+
+      if (normalizedUserType) {
+        updateData.user_type = normalizedUserType;
+        if (normalizedUserType === 'homeowner') {
+          const alreadyVerified = existingProfile.homeowner_status === 'verified';
+          updateData.homeowner_status = alreadyVerified ? 'verified' : 'pending_verification';
+          if (!alreadyVerified) {
+            updateData.homeowner_verified_at = null;
+          }
+        }
+      }
+
+      return updateData;
+    };
     
     if (!supabaseAdmin) {
       console.error('❌ SUPABASE_SERVICE_ROLE_KEY not configured');
@@ -202,6 +262,8 @@ app.post('/api/register-user', async (req, res) => {
         userType: normalizedUserType,
         user_type: normalizedUserType,
         propertyAddress: propertyAddress || '',
+        parcelNumber: parcelNumber || '',
+        homeownerStatus: normalizedUserType === 'homeowner' ? 'pending_verification' : '',
         emergencyContact: emergencyContact || ''
       }
     });
@@ -242,13 +304,10 @@ app.post('/api/register-user', async (req, res) => {
               console.log(`🔄 Updating user type from '${existingProfile.user_type}' to '${normalizedUserType}'`);
               
               // Update in database
+              const profileUpdatePayload = buildProfileUpdate(existingProfile);
               const { error: updateError } = await supabaseAdmin
                 .from('users')
-                .update({ 
-                  user_type: normalizedUserType,
-                  name: name || existingProfile.name,
-                  phone: phone || existingProfile.phone
-                })
+                .update(profileUpdatePayload)
                 .eq('email', email);
               
               if (updateError) {
@@ -270,6 +329,11 @@ app.post('/api/register-user', async (req, res) => {
                         ...authUser.user_metadata,
                         name: name || existingProfile.name || authUser.user_metadata?.name,
                         phone: phone || existingProfile.phone || authUser.user_metadata?.phone,
+                        propertyAddress: propertyAddress || existingProfile.property_address || authUser.user_metadata?.propertyAddress || '',
+                        parcelNumber: parcelNumber || existingProfile.parcel_number || authUser.user_metadata?.parcelNumber || '',
+                        homeownerStatus: existingProfile.homeowner_status === 'verified'
+                          ? 'verified'
+                          : (normalizedUserType === 'homeowner' ? 'pending_verification' : authUser.user_metadata?.homeownerStatus || ''),
                         userType: normalizedUserType,
                         user_type: normalizedUserType
                       }
@@ -285,12 +349,10 @@ app.post('/api/register-user', async (req, res) => {
               } catch (metadataErr) {
                 console.error('Error updating Auth metadata:', metadataErr);
               }
-            } else if (name || phone) {
-              // Update name/phone if provided, even if user type is the same
-              const updateData = {};
-              if (name) updateData.name = name;
-              if (phone) updateData.phone = phone;
-              
+            } else if (name || phone || propertyAddress || parcelNumber || emergencyContact) {
+              // Update profile details if provided, even if user type is the same
+              const updateData = buildProfileUpdate(existingProfile);
+
               const { error: updateError } = await supabaseAdmin
                 .from('users')
                 .update(updateData)
@@ -312,7 +374,12 @@ app.post('/api/register-user', async (req, res) => {
                 user_type: normalizedUserType,
                 phone: phone || '',
                 permissions: {},
-                email_verified: false
+                email_verified: false,
+                property_address: propertyAddress || '',
+                parcel_number: parcelNumber || '',
+                emergency_contact: emergencyContact || '',
+                homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
+                homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
               };
               
               const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -343,7 +410,12 @@ app.post('/api/register-user', async (req, res) => {
               user_type: normalizedUserType,
               phone: phone || '',
               permissions: {},
-              email_verified: false
+              email_verified: false,
+              property_address: propertyAddress || '',
+              parcel_number: parcelNumber || '',
+              emergency_contact: emergencyContact || '',
+              homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : existingProfile?.homeowner_status || null,
+              homeowner_verified_at: normalizedUserType === 'homeowner' ? null : existingProfile?.homeowner_verified_at || null
             };
             
             const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -465,7 +537,12 @@ app.post('/api/register-user', async (req, res) => {
         user_type: normalizedUserType,
         phone: phone || '',
         permissions: {},
-        email_verified: userData.user.email_confirmed_at !== null
+        email_verified: userData.user.email_confirmed_at !== null,
+        property_address: propertyAddress || '',
+        parcel_number: parcelNumber || '',
+        emergency_contact: emergencyContact || '',
+        homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
+        homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
       };
       
       const { data: profileResult, error: profileError } = await supabaseAdmin
@@ -2210,6 +2287,126 @@ app.patch('/api/notifications/:id/read', async (req, res) => {
   }
 });
 
+app.get('/api/homeowners/records', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { data: homeowners, error } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, homeowner_status, homeowner_verified_at, emergency_contact')
+      .eq('user_type', 'homeowner')
+      .order('property_address', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching homeowner records:', error);
+      return res.status(500).json({ error: 'Failed to fetch homeowners', details: error.message });
+    }
+
+    res.json({ success: true, homeowners: homeowners || [] });
+  } catch (error) {
+    console.error('Error fetching homeowner records:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.post('/api/homeowners/verify', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { email, parcelNumber, propertyAddress } = req.body || {};
+
+    if (!email || !parcelNumber || !propertyAddress) {
+      return res.status(400).json({ error: 'Email, parcel number, and property address are required.' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const normalizedParcel = parcelNumber.trim();
+    const normalizedAddress = propertyAddress.trim();
+
+    const { data: homeowner, error: fetchError } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('email', normalizedEmail)
+      .single();
+
+    if (fetchError || !homeowner) {
+      console.error('Error fetching homeowner profile for verification:', fetchError);
+      return res.status(404).json({ error: 'Homeowner profile not found.' });
+    }
+
+    const existingUserType = (homeowner.user_type || '').toLowerCase();
+    if (existingUserType !== 'homeowner') {
+      return res.status(400).json({ error: 'Only homeowner accounts can be verified with parcel information.' });
+    }
+
+    const existingParcel = (homeowner.parcel_number || '').trim();
+    const existingAddress = (homeowner.property_address || '').trim();
+
+    if (existingParcel && existingParcel !== normalizedParcel) {
+      return res.status(400).json({
+        error: 'The parcel number does not match our records. Please contact support for assistance.'
+      });
+    }
+
+    if (existingAddress && existingAddress.toLowerCase() !== normalizedAddress.toLowerCase()) {
+      return res.status(400).json({
+        error: 'The property address does not match our records. Please contact support for assistance.'
+      });
+    }
+
+    const updatePayload = {
+      parcel_number: normalizedParcel,
+      property_address: normalizedAddress,
+      homeowner_status: 'verified',
+      homeowner_verified_at: new Date().toISOString()
+    };
+
+    const { data: updatedHomeowner, error: updateError } = await supabaseAdmin
+      .from('users')
+      .update(updatePayload)
+      .eq('email', normalizedEmail)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('Error verifying homeowner:', updateError);
+      return res.status(500).json({ error: 'Failed to verify homeowner', details: updateError.message });
+    }
+
+    try {
+      const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers();
+      const authUser = authUsers.users.find(u => u.email?.toLowerCase() === normalizedEmail);
+
+      if (authUser) {
+        const { error: metadataError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+          user_metadata: {
+            ...authUser.user_metadata,
+            parcelNumber: normalizedParcel,
+            propertyAddress: normalizedAddress,
+            homeownerStatus: 'verified',
+            homeowner_verified_at: updatePayload.homeowner_verified_at
+          }
+        });
+
+        if (metadataError) {
+          console.error('Error updating homeowner metadata in Auth:', metadataError);
+        }
+      }
+    } catch (metadataErr) {
+      console.error('Error syncing homeowner metadata with Auth:', metadataErr);
+    }
+
+    res.json({ success: true, user: updatedHomeowner });
+  } catch (error) {
+    console.error('Error verifying homeowner:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 app.get('/api/admin/users', async (req, res) => {
   try {
     if (!supabaseAdmin) {
@@ -2218,7 +2415,7 @@ app.get('/api/admin/users', async (req, res) => {
 
     const { data: users, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, homeowner_status, homeowner_verified_at, emergency_contact')
       .order('name');
 
     if (error) {
