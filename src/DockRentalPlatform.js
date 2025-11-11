@@ -295,6 +295,34 @@ const DockRentalPlatform = () => {
     return value.toString().toLowerCase();
   };
 
+  useEffect(() => {
+    fetchHomeownerRecords();
+  }, [fetchHomeownerRecords]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setHomeownerVerificationOpen(false);
+      return;
+    }
+
+    const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
+    if (userType === 'homeowner') {
+      const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
+      if (homeownerStatus !== 'verified') {
+        setHomeownerVerificationData({
+          propertyAddress: currentUser.property_address || currentUser.propertyAddress || '',
+          parcelNumber: currentUser.parcel_number || currentUser.parcelNumber || ''
+        });
+        setHomeownerVerificationOpen(true);
+        fetchHomeownerRecords();
+      } else {
+        setHomeownerVerificationOpen(false);
+      }
+    } else {
+      setHomeownerVerificationOpen(false);
+    }
+  }, [currentUser, fetchHomeownerRecords]);
+
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((notification) => !notification.readAt).length,
     [notifications]
@@ -850,34 +878,6 @@ const DockRentalPlatform = () => {
       loadAllUsers();
     }
   }, [currentView, adminMode, allUsers.length]);
-
-  useEffect(() => {
-    fetchHomeownerRecords();
-  }, [fetchHomeownerRecords]);
-
-  useEffect(() => {
-    if (!currentUser) {
-      setHomeownerVerificationOpen(false);
-      return;
-    }
-
-    const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
-    if (userType === 'homeowner') {
-      const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
-      if (homeownerStatus !== 'verified') {
-        setHomeownerVerificationData({
-          propertyAddress: currentUser.property_address || currentUser.propertyAddress || '',
-          parcelNumber: currentUser.parcel_number || currentUser.parcelNumber || ''
-        });
-        setHomeownerVerificationOpen(true);
-        fetchHomeownerRecords();
-      } else {
-        setHomeownerVerificationOpen(false);
-      }
-    } else {
-      setHomeownerVerificationOpen(false);
-    }
-  }, [currentUser, fetchHomeownerRecords]);
 
   // Re-transform bookings when slips are loaded to add slipName
   useEffect(() => {
@@ -2410,7 +2410,7 @@ const DockRentalPlatform = () => {
     
     try {
       console.log('AUTH DEBUG - Attempting Supabase Auth signup');
-
+      
       if (registerData.userType === 'homeowner') {
         if (!registerData.propertyAddress || !registerData.parcelNumber) {
           alert('Homeowners must select their property address and enter the parcel number before continuing.');
@@ -5822,9 +5822,9 @@ const DockRentalPlatform = () => {
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap">
                                 {owner.homeowner_status === 'verified' ? (
-                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
                                     Verified
-                                  </span>
+                                </span>
                                 ) : owner.homeowner_status === 'pending_verification' ? (
                                   <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
                                     Pending Verification
@@ -6390,11 +6390,11 @@ const DockRentalPlatform = () => {
                           ))}
                         </select>
                       ) : (
-                        <input
-                          type="text"
-                          value={registerData.propertyAddress || ''}
-                          onChange={(e) => setRegisterData({...registerData, propertyAddress: e.target.value})}
-                          className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      <input
+                        type="text"
+                        value={registerData.propertyAddress || ''}
+                        onChange={(e) => setRegisterData({...registerData, propertyAddress: e.target.value})}
+                        className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                           placeholder="Enter your property address"
                           required
                         />
