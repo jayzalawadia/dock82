@@ -273,12 +273,49 @@ const DockRentalPlatform = () => {
   const [propertyOwners, setPropertyOwners] = useState([]);
   const [propertyOwnersLoading, setPropertyOwnersLoading] = useState(false);
   const [propertyOwnersError, setPropertyOwnersError] = useState(null);
+  const [showPropertyOwnerEditModal, setShowPropertyOwnerEditModal] = useState(false);
+  const [editingPropertyOwner, setEditingPropertyOwner] = useState(null);
+  const [propertyOwnerSaving, setPropertyOwnerSaving] = useState(false);
+  const [propertyOwnerFormErrors, setPropertyOwnerFormErrors] = useState({});
+  const [propertyOwnerDeletingId, setPropertyOwnerDeletingId] = useState(null);
   const [homeownerVerificationOpen, setHomeownerVerificationOpen] = useState(false);
   const [homeownerVerificationData, setHomeownerVerificationData] = useState({
     propertyAddress: '',
     parcelNumber: ''
   });
   const [homeownerVerificationSubmitting, setHomeownerVerificationSubmitting] = useState(false);
+  const normalizeUserType = useCallback((value) => {
+    if (!value) return 'renter';
+    return value.toString().toLowerCase();
+  }, []);
+  const fetchHomeownerRecords = useCallback(async () => {
+    setPropertyOwnersLoading(true);
+    setPropertyOwnersError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/admin/users`);
+      if (!response.ok) {
+        throw new Error('Failed to load property owners');
+      }
+      const data = await response.json();
+      const owners = (data.users || []).filter((user) => {
+        const normalizedType = normalizeUserType(user.user_type || user.userType || user.user_role);
+        const hasOwnerStatus = Boolean(
+          (user.homeowner_status || '').toString().trim()
+        );
+        const hasOwnerDetails = Boolean(
+          (user.property_address || user.parcel_number || user.lot_number || '').toString().trim()
+        );
+        return normalizedType === 'homeowner' || hasOwnerStatus || hasOwnerDetails;
+      });
+      setPropertyOwners(owners);
+    } catch (error) {
+      console.error('Error loading homeowner records:', error);
+      setPropertyOwners([]);
+      setPropertyOwnersError(error.message || 'Failed to load property owners');
+    } finally {
+      setPropertyOwnersLoading(false);
+    }
+  }, [API_BASE_URL, normalizeUserType]);
   const homeownerAddressOptions = useMemo(() => {
     const unique = new Set();
     (propertyOwners || []).forEach((owner) => {
@@ -288,12 +325,34 @@ const DockRentalPlatform = () => {
     });
     return Array.from(unique).sort((a, b) => a.localeCompare(b));
   }, [propertyOwners]);
+  const homeownerStatusOptions = useMemo(
+    () => [
+      { value: 'verified', label: 'Verified' },
+      { value: 'active_owner', label: 'Active Owner' },
+      { value: 'inactive_owner', label: 'Inactive Owner' },
+      { value: 'pending_verification', label: 'Pending Verification' },
+      { value: '', label: 'Unknown / Not Set' }
+    ],
+    []
+  );
+  const hasValidOwnerEmail = useCallback(
+    (owner) => owner?.email && !owner.email.startsWith('no-email-'),
+    []
+  );
+  const [newPropertyOwnerForm, setNewPropertyOwnerForm] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    propertyAddress: '',
+    parcelNumber: '',
+    lotNumber: '',
+    homeownerStatus: 'active_owner',
+    userType: 'homeowner'
+  });
+  const [newPropertyOwnerSubmitting, setNewPropertyOwnerSubmitting] = useState(false);
+  const [newPropertyOwnerErrors, setNewPropertyOwnerErrors] = useState({});
 
   // Slips data loaded from Supabase only
-  const normalizeUserType = (value) => {
-    if (!value) return 'renter';
-    return value.toString().toLowerCase();
-  };
 
   useEffect(() => {
     fetchHomeownerRecords();
@@ -359,6 +418,289 @@ const DockRentalPlatform = () => {
 
   const currentUserType = currentUser ? normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role) : null;
   const canManageUserRoles = currentUserType === 'admin' || currentUserType === 'superadmin';
+  const handleClosePropertyOwnerModal = useCallback(() => {
+    setShowPropertyOwnerEditModal(false);
+    setEditingPropertyOwner(null);
+    setPropertyOwnerFormErrors({});
+    setPropertyOwnerSaving(false);
+  }, []);
+  const resetNewPropertyOwnerForm = useCallback(() => {
+    setNewPropertyOwnerForm({
+      name: '',
+      email: '',
+      phone: '',
+      propertyAddress: '',
+      parcelNumber: '',
+      lotNumber: '',
+      homeownerStatus: 'active_owner',
+      userType: 'homeowner'
+    });
+    setNewPropertyOwnerErrors({});
+    setNewPropertyOwnerSubmitting(false);
+  }, []);
+  const handleNewPropertyOwnerInput = useCallback((field, value) => {
+    setNewPropertyOwnerForm((prev) => ({
+      ...prev,
+      [field]: value
+    }));
+  }, []);
+  const updatePropertyOwnerForm = useCallback((field, value) => {
+    setEditingPropertyOwner((prev) => (prev ? { ...prev, [field]: value } : prev));
+  }, []);
+  const handleEditPropertyOwner = useCallback(
+    (owner) => {
+      if (!owner) return;
+
+      const normalizedType = normalizeUserType(owner.user_type || owner.userType || owner.user_role || 'homeowner');
+      setEditingPropertyOwner({
+        id: owner.id,
+        name: owner.name || '',
+        email: hasValidOwnerEmail(owner) ? owner.email : '',
+        phone: owner.phone || '',
+        userType: normalizedType,
+        propertyAddress: owner.property_address || '',
+        parcelNumber: owner.parcel_number || '',
+        lotNumber: owner.lot_number || '',
+        homeownerStatus: owner.homeowner_status || ''
+      });
+      setPropertyOwnerFormErrors({});
+      setPropertyOwnerSaving(false);
+      setShowPropertyOwnerEditModal(true);
+    },
+    [hasValidOwnerEmail, normalizeUserType]
+  );
+  const handleSavePropertyOwner = async () => {
+    if (!editingPropertyOwner) {
+      return;
+    }
+
+    const errors = {};
+    if (!editingPropertyOwner.name || !editingPropertyOwner.name.trim()) {
+      errors.name = 'Name is required';
+    }
+    if (editingPropertyOwner.email && editingPropertyOwner.email.trim()) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(editingPropertyOwner.email.trim())) {
+        errors.email = 'Please enter a valid email address';
+      }
+    }
+    if (!editingPropertyOwner.userType) {
+      errors.userType = 'User type is required';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setPropertyOwnerFormErrors(errors);
+      return;
+    }
+
+    setPropertyOwnerFormErrors({});
+    setPropertyOwnerSaving(true);
+
+    const sanitizeOptional = (value) => {
+      if (value === undefined || value === null) {
+        return null;
+      }
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed.length ? trimmed : null;
+      }
+      return value;
+    };
+
+    try {
+      const normalizedUserType = normalizeUserType(editingPropertyOwner.userType || 'homeowner');
+      const payload = {
+        name: editingPropertyOwner.name.trim(),
+        userType: normalizedUserType,
+        email: sanitizeOptional(editingPropertyOwner.email),
+        phone: sanitizeOptional(editingPropertyOwner.phone),
+        propertyAddress: sanitizeOptional(editingPropertyOwner.propertyAddress),
+        parcelNumber: sanitizeOptional(editingPropertyOwner.parcelNumber),
+        lotNumber: sanitizeOptional(editingPropertyOwner.lotNumber),
+        homeownerStatus: sanitizeOptional(editingPropertyOwner.homeownerStatus)
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/admin/users/${editingPropertyOwner.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const responseData = await response.json().catch(() => null);
+
+      if (!response.ok || !responseData?.success) {
+        throw new Error(responseData?.details || responseData?.error || 'Failed to update property owner');
+      }
+
+      const updatedOwner = responseData.user;
+      setPropertyOwners((prev) =>
+        prev.map((owner) => (owner.id === updatedOwner.id ? updatedOwner : owner))
+      );
+      await fetchHomeownerRecords();
+      handleClosePropertyOwnerModal();
+      alert('✅ Property owner updated successfully!');
+    } catch (error) {
+      console.error('Error updating property owner:', error);
+      setPropertyOwnerFormErrors({
+        general: error.message || 'Failed to update property owner. Please try again.'
+      });
+    } finally {
+      setPropertyOwnerSaving(false);
+    }
+  };
+  const handleCreatePropertyOwner = useCallback(async (event) => {
+    event.preventDefault();
+
+    const errors = {};
+    if (!newPropertyOwnerForm.name.trim()) {
+      errors.name = 'Name is required';
+    }
+    if (newPropertyOwnerForm.email.trim()) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(newPropertyOwnerForm.email.trim())) {
+        errors.email = 'Please enter a valid email address';
+      }
+    }
+    if (!newPropertyOwnerForm.userType) {
+      errors.userType = 'User type is required';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setNewPropertyOwnerErrors(errors);
+      return;
+    }
+
+    setNewPropertyOwnerErrors({});
+    setNewPropertyOwnerSubmitting(true);
+
+    const sanitizeValue = (value) => {
+      if (value === undefined || value === null) return null;
+      if (typeof value !== 'string') return value;
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : null;
+    };
+
+    try {
+      const payload = {
+        name: newPropertyOwnerForm.name.trim(),
+        email: sanitizeValue(newPropertyOwnerForm.email),
+        phone: sanitizeValue(newPropertyOwnerForm.phone),
+        propertyAddress: sanitizeValue(newPropertyOwnerForm.propertyAddress),
+        parcelNumber: sanitizeValue(newPropertyOwnerForm.parcelNumber),
+        lotNumber: sanitizeValue(newPropertyOwnerForm.lotNumber),
+        homeownerStatus: sanitizeValue(newPropertyOwnerForm.homeownerStatus),
+        userType: newPropertyOwnerForm.userType
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const responseData = await response.json().catch(() => null);
+
+      if (!response.ok || !responseData?.success) {
+        throw new Error(responseData?.details || responseData?.error || 'Failed to create property owner');
+      }
+
+      await fetchHomeownerRecords();
+      resetNewPropertyOwnerForm();
+      alert('✅ Property owner added successfully!');
+    } catch (error) {
+      console.error('Error creating property owner:', error);
+      setNewPropertyOwnerErrors({
+        general: error.message || 'Failed to add property owner. Please try again.'
+      });
+    } finally {
+      setNewPropertyOwnerSubmitting(false);
+    }
+  }, [API_BASE_URL, fetchHomeownerRecords, newPropertyOwnerForm, resetNewPropertyOwnerForm]);
+  const handleDeletePropertyOwner = useCallback(
+    async (owner) => {
+      if (!owner?.id) {
+        alert('Unable to delete property owner: missing identifier.');
+        return;
+      }
+
+      const confirmDelete = window.confirm(
+        `Delete property owner "${owner.name || owner.email || owner.id}"?\n\nThis action cannot be undone.`
+      );
+
+      if (!confirmDelete) {
+        return;
+      }
+
+      setPropertyOwnerDeletingId(owner.id);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/admin/users/${owner.id}`, {
+          method: 'DELETE'
+        });
+
+        const responseData = await response.json().catch(() => null);
+
+        if (!response.ok || !responseData?.success) {
+          throw new Error(responseData?.details || responseData?.error || 'Failed to delete property owner');
+        }
+
+        setPropertyOwners((prev) => prev.filter((existing) => existing.id !== owner.id));
+        await fetchHomeownerRecords();
+        alert('✅ Property owner deleted successfully!');
+      } catch (error) {
+        console.error('Error deleting property owner:', error);
+        alert(error.message || '❌ Failed to delete property owner. Please try again.');
+      } finally {
+        setPropertyOwnerDeletingId(null);
+      }
+    },
+    [API_BASE_URL, fetchHomeownerRecords]
+  );
+  const deriveHomeownerStatus = useCallback(
+    (owner) => {
+      if (!owner) {
+        return { label: 'Unknown', className: 'bg-gray-100 text-gray-800' };
+      }
+
+      const rawStatus = (owner.homeowner_status || '').toString().toLowerCase();
+
+      if (rawStatus === 'verified') {
+        return { label: 'Verified', className: 'bg-green-100 text-green-800' };
+      }
+
+      if (rawStatus === 'pending_verification' || rawStatus === 'pending') {
+        return { label: 'Pending Verification', className: 'bg-yellow-100 text-yellow-800' };
+      }
+
+      if (rawStatus === 'inactive_owner' || rawStatus === 'inactive owner' || rawStatus === 'inactive') {
+        return { label: 'Inactive Owner', className: 'bg-red-100 text-red-800' };
+      }
+
+      if (rawStatus) {
+        if (rawStatus === 'active_owner' || rawStatus === 'active owner' || rawStatus === 'active') {
+          return { label: 'Active Owner', className: 'bg-green-50 text-green-700' };
+        }
+
+        return {
+          label: rawStatus.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+          className: 'bg-blue-100 text-blue-800'
+        };
+      }
+
+      if (normalizeUserType(owner.user_type || owner.userType || owner.user_role) === 'homeowner') {
+        if (owner.email_verified || owner.homeowner_verified_at) {
+          return { label: 'Verified', className: 'bg-green-100 text-green-800' };
+        }
+        return { label: 'Active Owner', className: 'bg-green-50 text-green-700' };
+      }
+
+      return { label: 'Unknown', className: 'bg-gray-100 text-gray-800' };
+    },
+    [normalizeUserType]
+  );
 
 
   // Helper function to validate dates
@@ -2905,25 +3247,6 @@ const DockRentalPlatform = () => {
       console.error('Error loading users:', error);
     }
   };
-
-  const fetchHomeownerRecords = useCallback(async () => {
-    setPropertyOwnersLoading(true);
-    setPropertyOwnersError(null);
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/homeowners/records`);
-      if (!response.ok) {
-        throw new Error('Failed to load homeowner records');
-      }
-      const data = await response.json();
-      setPropertyOwners(data.homeowners || []);
-    } catch (error) {
-      console.error('Error loading homeowner records:', error);
-      setPropertyOwners([]);
-      setPropertyOwnersError(error.message || 'Failed to load homeowner records');
-    } finally {
-      setPropertyOwnersLoading(false);
-    }
-  }, [API_BASE_URL]);
 
   const loadAllAdmins = async () => {
     try {
@@ -5786,6 +6109,154 @@ const DockRentalPlatform = () => {
                       </span>
                     )}
                   </h4>
+                  {superAdminMode && (
+                    <details className="bg-white rounded-lg shadow mb-6 border border-blue-100">
+                      <summary className="px-6 py-4 cursor-pointer text-blue-800 font-semibold flex items-center justify-between">
+                        <span>Add New Property Owner</span>
+                        <span className="text-sm font-normal text-blue-600">(click to expand)</span>
+                      </summary>
+                      <div className="px-6 pb-6 pt-2 space-y-4">
+                        {newPropertyOwnerErrors.general && (
+                          <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
+                            {newPropertyOwnerErrors.general}
+                          </div>
+                        )}
+                        <form onSubmit={handleCreatePropertyOwner} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="md:col-span-2">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Owner Name</label>
+                          <input
+                            type="text"
+                            value={newPropertyOwnerForm.name}
+                            onChange={(e) => handleNewPropertyOwnerInput('name', e.target.value)}
+                            className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                              newPropertyOwnerErrors.name ? 'border-red-500' : 'border-gray-300'
+                            }`}
+                            placeholder="Full name or household"
+                          />
+                          {newPropertyOwnerErrors.name && (
+                            <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.name}</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Email (optional)</label>
+                          <input
+                            type="email"
+                            value={newPropertyOwnerForm.email}
+                            onChange={(e) => handleNewPropertyOwnerInput('email', e.target.value)}
+                            className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                              newPropertyOwnerErrors.email ? 'border-red-500' : 'border-gray-300'
+                            }`}
+                            placeholder="owner@example.com"
+                          />
+                          {newPropertyOwnerErrors.email && (
+                            <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.email}</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
+                          <input
+                            type="text"
+                            value={newPropertyOwnerForm.phone}
+                            onChange={(e) => handleNewPropertyOwnerInput('phone', e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            placeholder="(555) 123-4567"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">User Type</label>
+                          <select
+                            value={newPropertyOwnerForm.userType}
+                            onChange={(e) => handleNewPropertyOwnerInput('userType', e.target.value)}
+                            className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                              newPropertyOwnerErrors.userType ? 'border-red-500' : 'border-gray-300'
+                            }`}
+                          >
+                            <option value="homeowner">Homeowner</option>
+                            <option value="renter">Renter</option>
+                            <option value="admin">Admin</option>
+                            <option value="superadmin">Superadmin</option>
+                          </select>
+                          {newPropertyOwnerErrors.userType && (
+                            <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.userType}</p>
+                          )}
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Property Address</label>
+                          <input
+                            type="text"
+                            value={newPropertyOwnerForm.propertyAddress}
+                            onChange={(e) => handleNewPropertyOwnerInput('propertyAddress', e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            placeholder="e.g. 9654 Privateer Road LGI"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Parcel Number</label>
+                          <input
+                            type="text"
+                            value={newPropertyOwnerForm.parcelNumber}
+                            onChange={(e) => handleNewPropertyOwnerInput('parcelNumber', e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            placeholder="Parcel number"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Lot Number</label>
+                          <input
+                            type="text"
+                            value={newPropertyOwnerForm.lotNumber}
+                            onChange={(e) => handleNewPropertyOwnerInput('lotNumber', e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            placeholder="Lot identifier"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Owner Status</label>
+                          <select
+                            value={newPropertyOwnerForm.homeownerStatus}
+                            onChange={(e) => handleNewPropertyOwnerInput('homeownerStatus', e.target.value)}
+                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          >
+                            {homeownerStatusOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="md:col-span-2 flex items-center justify-end space-x-3 pt-2">
+                          <button
+                            type="button"
+                            onClick={resetNewPropertyOwnerForm}
+                            className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                            disabled={newPropertyOwnerSubmitting}
+                          >
+                            Clear
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={newPropertyOwnerSubmitting}
+                            className={`px-4 py-2 text-sm font-medium rounded-md text-white ${
+                              newPropertyOwnerSubmitting
+                                ? 'bg-blue-300 cursor-not-allowed'
+                                : 'bg-blue-600 hover:bg-blue-700'
+                            }`}
+                          >
+                            {newPropertyOwnerSubmitting ? 'Adding...' : 'Add Property Owner'}
+                          </button>
+                        </div>
+                      </form>
+                      </div>
+                    </details>
+                  )}
                   <div className="bg-white rounded-lg shadow overflow-hidden">
                     <div className="overflow-x-auto">
                       <table className="min-w-full divide-y divide-gray-200">
@@ -5793,6 +6264,7 @@ const DockRentalPlatform = () => {
                           <tr>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Owner Name</th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Address</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lot #</th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Parcel</th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
@@ -5809,6 +6281,9 @@ const DockRentalPlatform = () => {
                                 {owner.property_address || 'N/A'}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {owner.lot_number || 'N/A'}
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                 {owner.parcel_number || 'N/A'}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -5821,22 +6296,26 @@ const DockRentalPlatform = () => {
                                 )}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap">
-                                {owner.homeowner_status === 'verified' ? (
-                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                                    Verified
+                                {(() => {
+                                  const status = deriveHomeownerStatus(owner);
+                                  return (
+                                    <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${status.className}`}>
+                                      {status.label}
                                 </span>
-                                ) : owner.homeowner_status === 'pending_verification' ? (
-                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
-                                    Pending Verification
-                                  </span>
-                                ) : (
-                                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
-                                    {owner.homeowner_status ? owner.homeowner_status : 'Unknown'}
-                                  </span>
-                                )}
+                                  );
+                                })()}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                {superAdminMode && owner.email ? (
+                                {superAdminMode ? (
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <button
+                                      onClick={() => handleEditPropertyOwner(owner)}
+                                      className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                      title="Edit Property Owner"
+                                    >
+                                      ✏️ Edit
+                                    </button>
+                                    {hasValidOwnerEmail(owner) && (
                                   <button
                                     onClick={() => promotePropertyOwnerToAdmin(owner)}
                                     className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
@@ -5844,7 +6323,21 @@ const DockRentalPlatform = () => {
                                   >
                                     👑 Make Admin
                                   </button>
-                                ) : owner.email ? (
+                                    )}
+                                    <button
+                                      onClick={() => handleDeletePropertyOwner(owner)}
+                                      disabled={propertyOwnerDeletingId === owner.id}
+                                      className={`inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white ${
+                                        propertyOwnerDeletingId === owner.id
+                                          ? 'bg-red-300 cursor-not-allowed'
+                                          : 'bg-red-600 hover:bg-red-700'
+                                      } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500`}
+                                      title="Delete Property Owner"
+                                    >
+                                      {propertyOwnerDeletingId === owner.id ? 'Deleting...' : '🗑 Delete'}
+                                    </button>
+                                  </div>
+                                ) : hasValidOwnerEmail(owner) ? (
                                   <span className="text-gray-400 text-xs">Contact superadmin</span>
                                 ) : (
                                   <span className="text-gray-400 text-xs">No email</span>
@@ -6483,6 +6976,187 @@ const DockRentalPlatform = () => {
 
 
 
+      {/* Property Owner Edit Modal */}
+      {showPropertyOwnerEditModal && editingPropertyOwner && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4 py-6 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-semibold text-gray-900">Edit Property Owner</h3>
+              <button
+                onClick={handleClosePropertyOwnerModal}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {propertyOwnerFormErrors.general && (
+              <div className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">
+                {propertyOwnerFormErrors.general}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Owner Name
+                </label>
+                <input
+                  type="text"
+                  value={editingPropertyOwner.name}
+                  onChange={(e) => updatePropertyOwnerForm('name', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                    propertyOwnerFormErrors.name ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="Enter owner name"
+                  required
+                />
+                {propertyOwnerFormErrors.name && (
+                  <p className="text-xs text-red-600 mt-1">{propertyOwnerFormErrors.name}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={editingPropertyOwner.email}
+                  onChange={(e) => updatePropertyOwnerForm('email', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                    propertyOwnerFormErrors.email ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="owner@example.com"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Leave blank to remove or if no email is available.
+                </p>
+                {propertyOwnerFormErrors.email && (
+                  <p className="text-xs text-red-600 mt-1">{propertyOwnerFormErrors.email}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Phone
+                </label>
+                <input
+                  type="text"
+                  value={editingPropertyOwner.phone || ''}
+                  onChange={(e) => updatePropertyOwnerForm('phone', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="(555) 123-4567"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  User Type
+                </label>
+                <select
+                  value={editingPropertyOwner.userType}
+                  onChange={(e) => updatePropertyOwnerForm('userType', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                    propertyOwnerFormErrors.userType ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                >
+                  <option value="homeowner">Homeowner</option>
+                  <option value="renter">Renter</option>
+                  <option value="admin">Admin</option>
+                  <option value="superadmin">Superadmin</option>
+                </select>
+                {propertyOwnerFormErrors.userType && (
+                  <p className="text-xs text-red-600 mt-1">{propertyOwnerFormErrors.userType}</p>
+                )}
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Property Address
+                </label>
+                <input
+                  type="text"
+                  value={editingPropertyOwner.propertyAddress || ''}
+                  onChange={(e) => updatePropertyOwnerForm('propertyAddress', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter property address"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Parcel Number
+                </label>
+                <input
+                  type="text"
+                  value={editingPropertyOwner.parcelNumber || ''}
+                  onChange={(e) => updatePropertyOwnerForm('parcelNumber', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Parcel number"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Lot Number
+                </label>
+                <input
+                  type="text"
+                  value={editingPropertyOwner.lotNumber || ''}
+                  onChange={(e) => updatePropertyOwnerForm('lotNumber', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Lot number"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Owner Status
+                </label>
+                <select
+                  value={editingPropertyOwner.homeownerStatus || ''}
+                  onChange={(e) => updatePropertyOwnerForm('homeownerStatus', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {homeownerStatusOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Use "Verified" once ownership has been confirmed.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end mt-6 space-x-3">
+              <button
+                type="button"
+                onClick={handleClosePropertyOwnerModal}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                disabled={propertyOwnerSaving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSavePropertyOwner}
+                disabled={propertyOwnerSaving}
+                className={`px-4 py-2 text-sm font-medium rounded-md text-white ${
+                  propertyOwnerSaving
+                    ? 'bg-blue-300 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {propertyOwnerSaving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* User Edit Modal */}
       {showUserEditModal && editingUser && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
@@ -6665,8 +7339,8 @@ const DockRentalPlatform = () => {
 
       {/* Profile Edit Modal */}
       {showProfileModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4 py-6 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold">Edit Profile</h2>
               <button
