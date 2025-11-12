@@ -37,6 +37,7 @@ console.log('🔑 SUPABASE_SERVICE_ROLE_KEY present:', supabaseServiceKey ? 'Yes
 console.log('🔑 SUPABASE_URL:', supabaseUrl);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+const DEFAULT_EMAIL_FROM = process.env.EMAIL_FROM || 'Dock82 <noreply@dock82.com>';
 
 // Determine allowed origins for CORS
 const defaultAllowedOrigins = [
@@ -262,16 +263,17 @@ app.post('/api/register-user', async (req, res) => {
         updateData.emergency_contact = emergencyContact.trim();
       }
 
-      if (normalizedUserType) {
-        updateData.user_type = normalizedUserType;
-        if (normalizedUserType === 'homeowner') {
-          const alreadyVerified = existingProfile.homeowner_status === 'verified';
-          updateData.homeowner_status = alreadyVerified ? 'verified' : 'pending_verification';
-          if (!alreadyVerified) {
-            updateData.homeowner_verified_at = null;
-          }
-        }
+    if (normalizedUserType) {
+      updateData.user_type = normalizedUserType;
+      if (normalizedUserType === 'homeowner') {
+        const alreadyVerified = existingProfile.homeowner_status === 'verified';
+        const verificationTimestamp = alreadyVerified
+          ? existingProfile.homeowner_verified_at
+          : new Date().toISOString();
+        updateData.homeowner_status = 'verified';
+        updateData.homeowner_verified_at = verificationTimestamp;
       }
+    }
 
       return updateData;
     };
@@ -288,10 +290,12 @@ app.post('/api/register-user', async (req, res) => {
     
     // Create user using Admin API - this bypasses email sending
     // Auto-confirm email so user can sign in immediately (we still send verification email via Resend)
+    const homeownerVerificationTimestamp = normalizedUserType === 'homeowner' ? new Date().toISOString() : null;
+
     const { data: userData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email: email,
       password: password,
-      email_confirm: true, // Auto-confirm so user can sign in immediately
+      email_confirm: true, // Auto-confirm email so user can sign in immediately
       user_metadata: {
         name: name || '',
         phone: phone || '',
@@ -299,7 +303,8 @@ app.post('/api/register-user', async (req, res) => {
         user_type: normalizedUserType,
         propertyAddress: propertyAddress || '',
         parcelNumber: parcelNumber || '',
-        homeownerStatus: normalizedUserType === 'homeowner' ? 'pending_verification' : '',
+        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : '',
+        homeowner_verified_at: homeownerVerificationTimestamp,
         emergencyContact: emergencyContact || ''
       }
     });
@@ -358,6 +363,9 @@ app.post('/api/register-user', async (req, res) => {
                 const authUser = authUsers.users.find(u => u.email === email);
                 
                 if (authUser) {
+                  const verificationTimestamp = existingProfile.homeowner_status === 'verified'
+                    ? existingProfile.homeowner_verified_at
+                    : new Date().toISOString();
                   const { error: metadataError } = await supabaseAdmin.auth.admin.updateUserById(
                     authUser.id,
                     {
@@ -367,9 +375,8 @@ app.post('/api/register-user', async (req, res) => {
                         phone: phone || existingProfile.phone || authUser.user_metadata?.phone,
                         propertyAddress: propertyAddress || existingProfile.property_address || authUser.user_metadata?.propertyAddress || '',
                         parcelNumber: parcelNumber || existingProfile.parcel_number || authUser.user_metadata?.parcelNumber || '',
-                        homeownerStatus: existingProfile.homeowner_status === 'verified'
-                          ? 'verified'
-                          : (normalizedUserType === 'homeowner' ? 'pending_verification' : authUser.user_metadata?.homeownerStatus || ''),
+                        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : authUser.user_metadata?.homeownerStatus || '',
+                        homeowner_verified_at: normalizedUserType === 'homeowner' ? verificationTimestamp : authUser.user_metadata?.homeowner_verified_at || null,
                         userType: normalizedUserType,
                         user_type: normalizedUserType
                       }
@@ -521,7 +528,7 @@ app.post('/api/register-user', async (req, res) => {
             });
             
             const { data: emailData, error: emailError } = await resend.emails.send({
-              from: 'Dock82 <onboarding@resend.dev>',
+              from: DEFAULT_EMAIL_FROM,
               to: email,
               subject: emailSubject,
               html: emailContent,
@@ -623,7 +630,7 @@ app.post('/api/register-user', async (req, res) => {
         });
         
       const { data: emailData, error: emailError } = await resend.emails.send({
-          from: 'Dock82 <onboarding@resend.dev>',
+          from: DEFAULT_EMAIL_FROM,
           to: email,
           subject: emailSubject,
           html: emailContent,
@@ -718,7 +725,7 @@ app.post('/api/send-verification-email', async (req, res) => {
     }
     
     const { data: emailData, error: emailError } = await resend.emails.send({
-      from: 'Dock82 <onboarding@resend.dev>',
+      from: DEFAULT_EMAIL_FROM,
         to: email,
         subject: emailSubject,
         html: emailContent,
@@ -1290,7 +1297,7 @@ async function sendEmailNotificationInternal(type, email, data) {
   }
 
   const { data: emailData, error: emailError } = await resend.emails.send({
-    from: 'Dock82 <onboarding@resend.dev>',
+    from: DEFAULT_EMAIL_FROM,
     to: email,
     subject: emailSubject,
     html: emailContent,

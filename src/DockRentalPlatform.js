@@ -279,6 +279,7 @@ const DockRentalPlatform = () => {
   const [propertyOwnerFormErrors, setPropertyOwnerFormErrors] = useState({});
   const [propertyOwnerDeletingId, setPropertyOwnerDeletingId] = useState(null);
   const [homeownerVerificationOpen, setHomeownerVerificationOpen] = useState(false);
+const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useState(false);
   const [homeownerVerificationData, setHomeownerVerificationData] = useState({
     propertyAddress: '',
     parcelNumber: ''
@@ -358,16 +359,17 @@ const DockRentalPlatform = () => {
     fetchHomeownerRecords();
   }, [fetchHomeownerRecords]);
 
-  useEffect(() => {
+useEffect(() => {
     if (!currentUser) {
       setHomeownerVerificationOpen(false);
+      setHomeownerVerificationDismissed(false);
       return;
     }
 
     const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
     if (userType === 'homeowner') {
       const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
-      if (homeownerStatus !== 'verified') {
+      if (homeownerStatus !== 'verified' && !homeownerVerificationDismissed) {
         setHomeownerVerificationData({
           propertyAddress: currentUser.property_address || currentUser.propertyAddress || '',
           parcelNumber: currentUser.parcel_number || currentUser.parcelNumber || ''
@@ -376,11 +378,15 @@ const DockRentalPlatform = () => {
         fetchHomeownerRecords();
       } else {
         setHomeownerVerificationOpen(false);
+        if (homeownerStatus === 'verified') {
+          setHomeownerVerificationDismissed(true);
+        }
       }
     } else {
       setHomeownerVerificationOpen(false);
+      setHomeownerVerificationDismissed(true);
     }
-  }, [currentUser, fetchHomeownerRecords]);
+  }, [currentUser, fetchHomeownerRecords, normalizeUserType, homeownerVerificationDismissed]);
 
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((notification) => !notification.readAt).length,
@@ -2768,13 +2774,26 @@ const DockRentalPlatform = () => {
           );
 
           if (!matchingOwner) {
-            alert('The selected property address is not recognized. Please contact Dock82 support for assistance.');
+            alert('❌ The selected property address is not recognized.\n\nIf you believe this is an error or you don\'t remember your property details, please contact Dock82 support at support@dock82.com for assistance.');
             return;
           }
 
           const recordedParcel = (matchingOwner.parcel_number || '').trim();
           if (recordedParcel && recordedParcel !== normalizedParcel) {
-            alert('The parcel number does not match our records. Please verify and try again or contact support.');
+            alert('❌ The parcel number does not match our records.\n\nPlease double-check the parcel number or contact Dock82 support at support@dock82.com if you need help.');
+            return;
+          }
+
+          const ownerEmail = (matchingOwner.email || '').trim().toLowerCase();
+          const registeringEmail = registerData.email.trim().toLowerCase();
+
+          if (!ownerEmail || ownerEmail.startsWith('no-email-')) {
+            alert('⚠️ We do not have an email on file for this property.\n\nPlease contact Dock82 support at support@dock82.com so we can update your records and help you complete registration.');
+            return;
+          }
+
+          if (ownerEmail !== registeringEmail) {
+            alert('❌ The email you entered does not match the email associated with this property in our records.\n\nPlease use the email we have on file or contact Dock82 support at support@dock82.com for assistance.');
             return;
           }
         }
@@ -3320,6 +3339,7 @@ const DockRentalPlatform = () => {
 
       alert('✅ Homeowner information verified. Your account is now active.');
       setHomeownerVerificationOpen(false);
+      setHomeownerVerificationDismissed(true);
       fetchHomeownerRecords();
     } catch (error) {
       console.error('Error verifying homeowner:', error);
@@ -6505,8 +6525,8 @@ const DockRentalPlatform = () => {
 
       {/* Simplified Login Modal */}
       {showLoginModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4 py-6 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold">
                 {authStep === 'login' ? 'Sign In' : 
@@ -6823,6 +6843,11 @@ const DockRentalPlatform = () => {
                 <div className="text-center mb-4">
                   <h3 className="text-lg font-semibold text-gray-900">Review Your Information</h3>
                   <p className="text-gray-600">Please verify your contact details before creating your account</p>
+                  {registerData.userType === 'homeowner' && (
+                    <p className="text-xs text-blue-600 mt-2">
+                      Need help finding your parcel number or registered email? Reach out to Dock82 support at <a href="mailto:support@dock82.com" className="underline">support@dock82.com</a>.
+                    </p>
+                  )}
                 </div>
                 
                 {/* Contact Info Summary */}
@@ -6906,6 +6931,9 @@ const DockRentalPlatform = () => {
                         placeholder="Enter the parcel number associated with your property"
                         required
                       />
+                        <p className="text-xs text-gray-500 mt-1">
+                          This must match the parcel number on record for your property. If you are unsure, contact Dock82 support.
+                        </p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Emergency Contact</label>

@@ -37,6 +37,7 @@ console.log('🔑 SUPABASE_SERVICE_ROLE_KEY present:', supabaseServiceKey ? 'Yes
 console.log('🔑 SUPABASE_URL:', supabaseUrl);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+const DEFAULT_EMAIL_FROM = process.env.EMAIL_FROM || 'Dock82 <noreply@dock82.com>';
 
 // Determine allowed origins for CORS
 const defaultAllowedOrigins = [
@@ -117,6 +118,42 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'Local API server is running' });
 });
 
+const sanitizeNullableString = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = value.toString().trim();
+  return trimmed.length ? trimmed : null;
+};
+
+const normalizeUserTypeValue = (value) => {
+  const sanitized = sanitizeNullableString(value);
+  return sanitized ? sanitized.toLowerCase() : null;
+};
+
+const mapAdminUserRecord = (user) => {
+  if (!user) {
+    return user;
+  }
+
+  const normalizedType = normalizeUserTypeValue(user.user_type) || 'renter';
+  const permissions = user.permissions || {};
+  let homeownerStatus =
+    permissions.homeowner_status ||
+    permissions.homeownerStatus ||
+    permissions.status ||
+    null;
+
+  if (!homeownerStatus && normalizedType === 'homeowner') {
+    homeownerStatus = user.email_verified ? 'verified' : 'active_owner';
+  }
+
+  return {
+    ...user,
+    homeowner_status: homeownerStatus,
+    homeowner_verified_at: user.email_verified ? user.updated_at || user.created_at : null
+  };
+};
+
 // Create payment intent endpoint
 app.post('/api/create-payment-intent', async (req, res) => {
   try {
@@ -154,7 +191,7 @@ app.post('/api/create-payment-intent', async (req, res) => {
 
     console.log('Payment intent created:', intent.id);
     
-    res.json({
+    res.json({ 
       clientSecret: intent.client_secret,
       paymentIntentId: intent.id,
       captureMethod: intent.capture_method
@@ -226,16 +263,17 @@ app.post('/api/register-user', async (req, res) => {
         updateData.emergency_contact = emergencyContact.trim();
       }
 
-      if (normalizedUserType) {
-        updateData.user_type = normalizedUserType;
-        if (normalizedUserType === 'homeowner') {
-          const alreadyVerified = existingProfile.homeowner_status === 'verified';
-          updateData.homeowner_status = alreadyVerified ? 'verified' : 'pending_verification';
-          if (!alreadyVerified) {
-            updateData.homeowner_verified_at = null;
-          }
-        }
+    if (normalizedUserType) {
+      updateData.user_type = normalizedUserType;
+      if (normalizedUserType === 'homeowner') {
+        const alreadyVerified = existingProfile.homeowner_status === 'verified';
+        const verificationTimestamp = alreadyVerified
+          ? existingProfile.homeowner_verified_at
+          : new Date().toISOString();
+        updateData.homeowner_status = 'verified';
+        updateData.homeowner_verified_at = verificationTimestamp;
       }
+    }
 
       return updateData;
     };
@@ -252,10 +290,12 @@ app.post('/api/register-user', async (req, res) => {
     
     // Create user using Admin API - this bypasses email sending
     // Auto-confirm email so user can sign in immediately (we still send verification email via Resend)
+    const homeownerVerificationTimestamp = normalizedUserType === 'homeowner' ? new Date().toISOString() : null;
+
     const { data: userData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email: email,
       password: password,
-      email_confirm: true, // Auto-confirm so user can sign in immediately
+      email_confirm: true, // Auto-confirm email so user can sign in immediately
       user_metadata: {
         name: name || '',
         phone: phone || '',
@@ -263,7 +303,8 @@ app.post('/api/register-user', async (req, res) => {
         user_type: normalizedUserType,
         propertyAddress: propertyAddress || '',
         parcelNumber: parcelNumber || '',
-        homeownerStatus: normalizedUserType === 'homeowner' ? 'pending_verification' : '',
+        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : '',
+        homeowner_verified_at: homeownerVerificationTimestamp,
         emergencyContact: emergencyContact || ''
       }
     });
@@ -322,6 +363,9 @@ app.post('/api/register-user', async (req, res) => {
                 const authUser = authUsers.users.find(u => u.email === email);
                 
                 if (authUser) {
+                  const verificationTimestamp = existingProfile.homeowner_status === 'verified'
+                    ? existingProfile.homeowner_verified_at
+                    : new Date().toISOString();
                   const { error: metadataError } = await supabaseAdmin.auth.admin.updateUserById(
                     authUser.id,
                     {
@@ -331,9 +375,8 @@ app.post('/api/register-user', async (req, res) => {
                         phone: phone || existingProfile.phone || authUser.user_metadata?.phone,
                         propertyAddress: propertyAddress || existingProfile.property_address || authUser.user_metadata?.propertyAddress || '',
                         parcelNumber: parcelNumber || existingProfile.parcel_number || authUser.user_metadata?.parcelNumber || '',
-                        homeownerStatus: existingProfile.homeowner_status === 'verified'
-                          ? 'verified'
-                          : (normalizedUserType === 'homeowner' ? 'pending_verification' : authUser.user_metadata?.homeownerStatus || ''),
+                        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : authUser.user_metadata?.homeownerStatus || '',
+                        homeowner_verified_at: normalizedUserType === 'homeowner' ? verificationTimestamp : authUser.user_metadata?.homeowner_verified_at || null,
                         userType: normalizedUserType,
                         user_type: normalizedUserType
                       }
@@ -485,7 +528,7 @@ app.post('/api/register-user', async (req, res) => {
             });
             
             const { data: emailData, error: emailError } = await resend.emails.send({
-              from: 'Dock82 <onboarding@resend.dev>',
+              from: DEFAULT_EMAIL_FROM,
               to: email,
               subject: emailSubject,
               html: emailContent,
@@ -587,7 +630,7 @@ app.post('/api/register-user', async (req, res) => {
         });
         
       const { data: emailData, error: emailError } = await resend.emails.send({
-          from: 'Dock82 <onboarding@resend.dev>',
+          from: DEFAULT_EMAIL_FROM,
           to: email,
           subject: emailSubject,
           html: emailContent,
@@ -682,7 +725,7 @@ app.post('/api/send-verification-email', async (req, res) => {
     }
     
     const { data: emailData, error: emailError } = await resend.emails.send({
-      from: 'Dock82 <onboarding@resend.dev>',
+      from: DEFAULT_EMAIL_FROM,
         to: email,
         subject: emailSubject,
         html: emailContent,
@@ -785,7 +828,7 @@ function generatePaymentReceiptEmail(data) {
         </table>
         
       <p><strong>Reminder:</strong> Bookings become non-refundable within seven (7) days of check-in. If you need to adjust your stay, please reach out before that window so we can assist.</p>
-
+        
         <p>Your booking confirmation and permit will be sent shortly.</p>
         <p>If you have any questions, please contact us.</p>
       </div>
@@ -1254,7 +1297,7 @@ async function sendEmailNotificationInternal(type, email, data) {
   }
 
   const { data: emailData, error: emailError } = await resend.emails.send({
-    from: 'Dock82 <onboarding@resend.dev>',
+    from: DEFAULT_EMAIL_FROM,
     to: email,
     subject: emailSubject,
     html: emailContent,
@@ -2415,7 +2458,7 @@ app.get('/api/admin/users', async (req, res) => {
 
     const { data: users, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type, phone, property_address, parcel_number, homeowner_status, homeowner_verified_at, emergency_contact')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, updated_at, created_at')
       .order('name');
 
     if (error) {
@@ -2423,9 +2466,240 @@ app.get('/api/admin/users', async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch users', details: error.message });
     }
 
-    res.json({ success: true, users: users || [] });
+    res.json({ success: true, users: (users || []).map(mapAdminUserRecord) });
   } catch (error) {
     console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const {
+      name,
+      email,
+      phone,
+      userType,
+      propertyAddress,
+      parcelNumber,
+      lotNumber,
+      homeownerStatus
+    } = req.body || {};
+
+    const sanitizedName = sanitizeNullableString(name);
+    if (!sanitizedName) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    const sanitizedEmail = sanitizeNullableString(email);
+    if (sanitizedEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(sanitizedEmail)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+    }
+
+    const normalizedType = normalizeUserTypeValue(userType) || 'homeowner';
+    if (!['renter', 'homeowner', 'admin', 'superadmin'].includes(normalizedType)) {
+      return res.status(400).json({ error: 'Invalid user type' });
+    }
+
+    let permissions = {};
+    let normalizedStatus = sanitizeNullableString(homeownerStatus);
+    if (!normalizedStatus && normalizedType === 'homeowner') {
+      normalizedStatus = 'active_owner';
+    }
+    if (normalizedStatus) {
+      permissions.homeowner_status = normalizedStatus;
+    }
+
+    const now = new Date().toISOString();
+    const insertPayload = {
+      name: sanitizedName,
+      email: sanitizedEmail ?? null,
+      phone: sanitizeNullableString(phone),
+      user_type: normalizedType,
+      property_address: sanitizeNullableString(propertyAddress),
+      parcel_number: sanitizeNullableString(parcelNumber),
+      lot_number: sanitizeNullableString(lotNumber),
+      password_hash: 'manual_import',
+      permissions,
+      email_verified: false,
+      created_at: now,
+      updated_at: now
+    };
+
+    const { data: insertedUser, error: insertError } = await supabaseAdmin
+      .from('users')
+      .insert(insertPayload)
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .single();
+
+    if (insertError) {
+      console.error('Error creating property owner:', insertError);
+      if (insertError.code === '23505') {
+        return res.status(409).json({ error: 'A user with this email already exists' });
+      }
+      return res.status(500).json({ error: 'Failed to create property owner', details: insertError.message });
+    }
+
+    res.status(201).json({ success: true, user: mapAdminUserRecord(insertedUser) });
+  } catch (error) {
+    console.error('Error creating property owner:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.patch('/api/admin/users/:id', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const {
+      name,
+      email,
+      phone,
+      userType,
+      propertyAddress,
+      parcelNumber,
+      lotNumber,
+      homeownerStatus
+    } = req.body || {};
+
+    const { data: existingUser, error: fetchError } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !existingUser) {
+      console.error('Error loading user for update:', fetchError);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const updatePayload = { updated_at: new Date().toISOString() };
+
+    if (name !== undefined) {
+      const sanitizedName = sanitizeNullableString(name);
+      if (!sanitizedName) {
+        return res.status(400).json({ error: 'Name cannot be empty' });
+      }
+      updatePayload.name = sanitizedName;
+    }
+
+    if (email !== undefined) {
+      const sanitizedEmail = sanitizeNullableString(email);
+      if (sanitizedEmail) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(sanitizedEmail)) {
+          return res.status(400).json({ error: 'Invalid email format' });
+        }
+      }
+      updatePayload.email = sanitizedEmail ?? null;
+    }
+
+    if (phone !== undefined) {
+      updatePayload.phone = sanitizeNullableString(phone) ?? null;
+    }
+
+    if (propertyAddress !== undefined) {
+      updatePayload.property_address = sanitizeNullableString(propertyAddress);
+    }
+
+    if (parcelNumber !== undefined) {
+      updatePayload.parcel_number = sanitizeNullableString(parcelNumber);
+    }
+
+    if (lotNumber !== undefined) {
+      updatePayload.lot_number = sanitizeNullableString(lotNumber);
+    }
+
+    if (userType !== undefined) {
+      const normalized = normalizeUserTypeValue(userType);
+      if (!normalized) {
+        return res.status(400).json({ error: 'User type cannot be empty' });
+      }
+      if (!['renter', 'homeowner', 'admin', 'superadmin'].includes(normalized)) {
+        return res.status(400).json({ error: 'Invalid user type' });
+      }
+      updatePayload.user_type = normalized;
+    }
+
+    if (homeownerStatus !== undefined) {
+      let permissions = existingUser.permissions || {};
+      const sanitizedStatus = sanitizeNullableString(homeownerStatus);
+      permissions = { ...permissions };
+
+      if (sanitizedStatus) {
+        permissions.homeowner_status = sanitizedStatus;
+      } else {
+        delete permissions.homeowner_status;
+        delete permissions.homeownerStatus;
+        delete permissions.status;
+      }
+
+      updatePayload.permissions = permissions;
+    }
+
+    const { data: updatedUser, error: updateError } = await supabaseAdmin
+      .from('users')
+      .update(updatePayload)
+      .eq('id', id)
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .single();
+
+    if (updateError) {
+      console.error('Error updating user:', updateError);
+      return res.status(500).json({ error: 'Failed to update user', details: updateError.message });
+    }
+
+    res.json({ success: true, user: mapAdminUserRecord(updatedUser) });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const { data: deletedUser, error: deleteError } = await supabaseAdmin
+      .from('users')
+      .delete()
+      .eq('id', id)
+      .select('id, email')
+      .single();
+
+    if (deleteError) {
+      console.error('Error deleting user:', deleteError);
+      return res.status(500).json({ error: 'Failed to delete user', details: deleteError.message });
+    }
+
+    if (!deletedUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ success: true, user: deletedUser });
+  } catch (error) {
+    console.error('Error deleting user:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
