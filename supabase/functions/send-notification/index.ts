@@ -1,6 +1,20 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 
-const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY');
+type DenoEnv = { get: (key: string) => string | undefined };
+type EdgeRuntime = {
+  serve: (handler: (req: Request) => Response | Promise<Response>) => void;
+  env: DenoEnv;
+};
+
+const edgeRuntime: EdgeRuntime | undefined = (globalThis as { Deno?: EdgeRuntime }).Deno;
+const edgeEnv = edgeRuntime?.env;
+
+const RESEND_API_KEY = edgeEnv?.get('RESEND_API_KEY');
+const EMAIL_FROM_ENV = edgeEnv?.get('EMAIL_FROM') ?? edgeEnv?.get('RESEND_FROM');
+const DEFAULT_EMAIL_FROM =
+  EMAIL_FROM_ENV && !EMAIL_FROM_ENV.toLowerCase().includes('resend.dev')
+    ? EMAIL_FROM_ENV
+    : 'noreply@dock82.com';
 
 interface EmailData {
   guestName: string;
@@ -15,7 +29,11 @@ interface EmailData {
   bookingId?: string;
 }
 
-Deno.serve(async (req) => {
+if (!edgeRuntime?.serve) {
+  throw new Error('Edge runtime is not available');
+}
+
+edgeRuntime.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, {
@@ -36,6 +54,17 @@ Deno.serve(async (req) => {
   }
 
   try {
+    if (!RESEND_API_KEY) {
+      console.error('Missing RESEND_API_KEY environment variable');
+      return new Response(JSON.stringify({ error: 'Email service not configured' }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+
     const { type, email, data }: { type: string, email: string, data: EmailData } = await req.json();
 
     if (!type || !email || !data) {
@@ -85,7 +114,7 @@ Deno.serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Dock82 <noreply@dock82.com>',
+        from: DEFAULT_EMAIL_FROM,
         to: [email],
         subject: emailSubject,
         html: emailHtml,
@@ -130,7 +159,9 @@ Deno.serve(async (req) => {
 });
 
 function generateBookingConfirmationEmail(data: EmailData): string {
-  const nights = Math.ceil((new Date(data.checkOut) - new Date(data.checkIn)) / (1000 * 60 * 60 * 24));
+  const checkInTime = new Date(data.checkIn).getTime();
+  const checkOutTime = new Date(data.checkOut).getTime();
+  const nights = Math.ceil((checkOutTime - checkInTime) / (1000 * 60 * 60 * 24));
   
   return `
     <!DOCTYPE html>
@@ -188,7 +219,7 @@ function generateBookingConfirmationEmail(data: EmailData): string {
           </div>
         </div>
         
-        ${data.totalAmount ? `
+        ${typeof data.totalAmount === 'number' ? `
         <div class="total">
           💰 Total Cost: $${data.totalAmount.toFixed(2)}
         </div>
@@ -271,7 +302,7 @@ function generatePaymentReceiptEmail(data: EmailData): string {
           </div>
         </div>
         
-        ${data.totalAmount ? `
+        ${typeof data.totalAmount === 'number' ? `
         <div class="amount">
           💰 Amount Paid: $${data.totalAmount.toFixed(2)}
         </div>

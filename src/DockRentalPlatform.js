@@ -248,7 +248,6 @@ const DockRentalPlatform = () => {
     paymentMethod: 'stripe',
     userType: 'renter',
     selectedOwner: '',
-    homeownerAuthorizationLetter: null,
     homeownerInsuranceProof: null,
     // Removed rental property fields - simplified to just dock dates
   });
@@ -279,7 +278,7 @@ const DockRentalPlatform = () => {
   const [propertyOwnerFormErrors, setPropertyOwnerFormErrors] = useState({});
   const [propertyOwnerDeletingId, setPropertyOwnerDeletingId] = useState(null);
   const [homeownerVerificationOpen, setHomeownerVerificationOpen] = useState(false);
-const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useState(false);
+  const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useState(false);
   const [homeownerVerificationData, setHomeownerVerificationData] = useState({
     propertyAddress: '',
     parcelNumber: ''
@@ -288,6 +287,32 @@ const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useS
   const normalizeUserType = useCallback((value) => {
     if (!value) return 'renter';
     return value.toString().toLowerCase();
+  }, []);
+  const sortPropertyOwners = useCallback((owners = []) => {
+    const priorityForOwner = (owner) => {
+      const status = (owner?.homeowner_status || owner?.permissions?.homeowner_status || '')
+        .toString()
+        .toLowerCase();
+      if (status === 'pending_verification' || status === 'pending') {
+        return 0;
+      }
+      if (status === 'inactive_owner' || status === 'inactive owner' || status === 'inactive') {
+        return 2;
+      }
+      return 1;
+    };
+
+    return [...owners].sort((a, b) => {
+      const priorityDiff = priorityForOwner(a) - priorityForOwner(b);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      const nameA = (a?.name || a?.email || '').toString().toLowerCase();
+      const nameB = (b?.name || b?.email || '').toString().toLowerCase();
+      if (nameA < nameB) return -1;
+      if (nameA > nameB) return 1;
+      return 0;
+    });
   }, []);
   const fetchHomeownerRecords = useCallback(async () => {
     setPropertyOwnersLoading(true);
@@ -308,7 +333,7 @@ const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useS
         );
         return normalizedType === 'homeowner' || hasOwnerStatus || hasOwnerDetails;
       });
-      setPropertyOwners(owners);
+      setPropertyOwners(sortPropertyOwners(owners));
     } catch (error) {
       console.error('Error loading homeowner records:', error);
       setPropertyOwners([]);
@@ -316,7 +341,7 @@ const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useS
     } finally {
       setPropertyOwnersLoading(false);
     }
-  }, [API_BASE_URL, normalizeUserType]);
+  }, [API_BASE_URL, normalizeUserType, sortPropertyOwners]);
   const homeownerAddressOptions = useMemo(() => {
     const unique = new Set();
     (propertyOwners || []).forEach((owner) => {
@@ -336,10 +361,57 @@ const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useS
     ],
     []
   );
+  const pendingPropertyOwnersCount = useMemo(
+    () =>
+      propertyOwners.filter((owner) => {
+        const status = (owner.homeowner_status || '').toString().toLowerCase();
+        return status === 'pending_verification' || status === 'pending';
+      }).length,
+    [propertyOwners]
+  );
   const hasValidOwnerEmail = useCallback(
     (owner) => owner?.email && !owner.email.startsWith('no-email-'),
     []
   );
+  const currentUserType = currentUser ? normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role) : null;
+
+  useEffect(() => {
+    if (!currentUser || currentUserType !== 'homeowner' || !propertyOwners.length) {
+      return;
+    }
+
+    const currentEmail = (currentUser.email || '').toLowerCase();
+    if (!currentEmail) {
+      return;
+    }
+
+    const matchingOwner = propertyOwners.find(
+      (owner) => (owner.email || '').toLowerCase() === currentEmail
+    );
+
+    if (!matchingOwner) {
+      return;
+    }
+
+    const nextStatus = matchingOwner.homeowner_status || null;
+    const nextVerifiedAt = matchingOwner.homeowner_verified_at || matchingOwner.homeownerVerifiedAt || null;
+    const currentStatus = currentUser.homeowner_status || currentUser.homeownerStatus || null;
+    const currentVerifiedAt = currentUser.homeowner_verified_at || currentUser.homeownerVerifiedAt || null;
+
+    if (nextStatus !== currentStatus || nextVerifiedAt !== currentVerifiedAt) {
+      setCurrentUser((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          homeowner_status: nextStatus,
+          homeownerStatus: nextStatus,
+          homeowner_verified_at: nextVerifiedAt,
+          homeownerVerifiedAt: nextVerifiedAt
+        };
+      });
+    }
+  }, [currentUser, currentUserType, propertyOwners]);
+
   const [newPropertyOwnerForm, setNewPropertyOwnerForm] = useState({
     name: '',
     email: '',
@@ -369,10 +441,16 @@ useEffect(() => {
     const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
     if (userType === 'homeowner') {
       const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
-      if (homeownerStatus !== 'verified' && !homeownerVerificationDismissed) {
+      const propertyAddressValue = currentUser.property_address || currentUser.propertyAddress || '';
+      const parcelNumberValue = currentUser.parcel_number || currentUser.parcelNumber || '';
+      const isMissingDetails = !propertyAddressValue || !parcelNumberValue;
+      const shouldPromptForDetails =
+        !homeownerVerificationDismissed && homeownerStatus !== 'verified' && isMissingDetails;
+
+      if (shouldPromptForDetails) {
         setHomeownerVerificationData({
-          propertyAddress: currentUser.property_address || currentUser.propertyAddress || '',
-          parcelNumber: currentUser.parcel_number || currentUser.parcelNumber || ''
+          propertyAddress: propertyAddressValue,
+          parcelNumber: parcelNumberValue
         });
         setHomeownerVerificationOpen(true);
         fetchHomeownerRecords();
@@ -422,7 +500,6 @@ useEffect(() => {
     setCommonEtiquetteInitialized(true);
   }, [slips, commonEtiquetteInitialized]);
 
-  const currentUserType = currentUser ? normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role) : null;
   const canManageUserRoles = currentUserType === 'admin' || currentUserType === 'superadmin';
   const handleClosePropertyOwnerModal = useCallback(() => {
     setShowPropertyOwnerEditModal(false);
@@ -542,7 +619,9 @@ useEffect(() => {
 
       const updatedOwner = responseData.user;
       setPropertyOwners((prev) =>
-        prev.map((owner) => (owner.id === updatedOwner.id ? updatedOwner : owner))
+        sortPropertyOwners(
+          prev.map((owner) => (owner.id === updatedOwner.id ? updatedOwner : owner))
+        )
       );
       await fetchHomeownerRecords();
       handleClosePropertyOwnerModal();
@@ -653,7 +732,9 @@ useEffect(() => {
           throw new Error(responseData?.details || responseData?.error || 'Failed to delete property owner');
         }
 
-        setPropertyOwners((prev) => prev.filter((existing) => existing.id !== owner.id));
+        setPropertyOwners((prev) =>
+          sortPropertyOwners(prev.filter((existing) => existing.id !== owner.id))
+        );
         await fetchHomeownerRecords();
         alert('✅ Property owner deleted successfully!');
       } catch (error) {
@@ -662,8 +743,8 @@ useEffect(() => {
       } finally {
         setPropertyOwnerDeletingId(null);
       }
-    },
-    [API_BASE_URL, fetchHomeownerRecords]
+  },
+    [API_BASE_URL, fetchHomeownerRecords, sortPropertyOwners]
   );
   const deriveHomeownerStatus = useCallback(
     (owner) => {
@@ -672,6 +753,7 @@ useEffect(() => {
       }
 
       const rawStatus = (owner.homeowner_status || '').toString().toLowerCase();
+      const verifiedAt = owner.homeowner_verified_at || owner.homeownerVerifiedAt;
 
       if (rawStatus === 'verified') {
         return { label: 'Verified', className: 'bg-green-100 text-green-800' };
@@ -697,7 +779,7 @@ useEffect(() => {
       }
 
       if (normalizeUserType(owner.user_type || owner.userType || owner.user_role) === 'homeowner') {
-        if (owner.email_verified || owner.homeowner_verified_at) {
+        if (verifiedAt || owner.email_verified) {
           return { label: 'Verified', className: 'bg-green-100 text-green-800' };
         }
         return { label: 'Active Owner', className: 'bg-green-50 text-green-700' };
@@ -1867,7 +1949,6 @@ useEffect(() => {
       // Upload files to Supabase Storage before creating booking
       let rentalAgreementPath = null;
       let insuranceProofPath = null;
-      let homeownerAuthorizationPath = null;
       let homeownerInsurancePath = null;
       let boatPicturePath = null;
       const authUserId = userData?.user?.id;
@@ -1890,13 +1971,6 @@ useEffect(() => {
         }
 
         if (bookingData.userType === 'homeowner' && authUserId) {
-          if (bookingData.homeownerAuthorizationLetter) {
-            const uploadResult = await uploadUserDocument(bookingData.homeownerAuthorizationLetter, authUserId, 'homeowner-authorization');
-            if (uploadResult.success) {
-              homeownerAuthorizationPath = uploadResult.filePath;
-            }
-          }
-
           if (bookingData.homeownerInsuranceProof) {
             const uploadResult = await uploadUserDocument(bookingData.homeownerInsuranceProof, authUserId, 'homeowner-insurance');
             if (uploadResult.success) {
@@ -1916,10 +1990,10 @@ useEffect(() => {
       }
 
       const rentalAgreementName = bookingData.userType === 'homeowner'
-        ? bookingData.homeownerAuthorizationLetter?.name || null
+        ? null
         : bookingData.rentalAgreement?.name || null;
       const finalRentalAgreementPath = bookingData.userType === 'homeowner'
-        ? homeownerAuthorizationPath
+        ? null
         : rentalAgreementPath;
 
       const insuranceProofName = bookingData.userType === 'homeowner'
@@ -2061,6 +2135,24 @@ useEffect(() => {
       return;
     }
 
+    if (bookingData.userType === 'homeowner') {
+      const homeownerStatus = (
+        currentUser?.homeowner_status ||
+        currentUser?.homeownerStatus ||
+        ''
+      )
+        .toString()
+        .toLowerCase();
+      const allowedStatuses = new Set(['verified', 'active_owner', 'active owner', 'active']);
+      if (!allowedStatuses.has(homeownerStatus)) {
+        alert(
+          'Your homeowner account is pending Dock82 approval. Please contact support if you need assistance with verification.'
+        );
+        setCurrentView('browse');
+        return;
+      }
+    }
+
     // Homeowners must agree to terms
     if (bookingData.userType === 'homeowner' && !bookingData.agreedToTerms) {
       alert('Please read and agree to the dock etiquette guidelines before proceeding.');
@@ -2071,11 +2163,6 @@ useEffect(() => {
     // Simplified validation - just check required fields
     if (bookingData.userType === 'renter' && (!bookingData.rentalAgreement || !bookingData.insuranceProof)) {
       alert('Please upload both your rental agreement and boat insurance proof.');
-      return;
-    }
-
-    if (bookingData.userType === 'homeowner' && !bookingData.homeownerAuthorizationLetter) {
-      alert('Please upload your homeowner authorization letter.');
       return;
     }
 
@@ -2427,17 +2514,46 @@ useEffect(() => {
 
           {renderAvailabilityCalendar()}
 
-          {(isDateFilterActive ? slipAvailableForRange : slipActive) && (
-          <button
-            onClick={() => {
-              setSelectedSlip(slip);
-              setCurrentView('booking');
-            }}
-            className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 transition-colors"
-          >
-            Book This Slip
-          </button>
-        )}
+        {(() => {
+          if (!(isDateFilterActive ? slipAvailableForRange : slipActive)) {
+            return null;
+          }
+
+          const isHomeownerUser = currentUserType === 'homeowner';
+          const homeownerStatus = (
+            currentUser?.homeowner_status ||
+            currentUser?.homeownerStatus ||
+            ''
+          )
+            .toString()
+            .toLowerCase();
+          const homeownerVerified = !isHomeownerUser || homeownerStatus === 'verified';
+
+          if (homeownerVerified) {
+            return (
+              <button
+                onClick={() => {
+                  setSelectedSlip(slip);
+                  setCurrentView('booking');
+                }}
+                className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 transition-colors"
+              >
+                Book This Slip
+              </button>
+            );
+          }
+
+          return (
+            <button
+              type="button"
+              disabled
+              className="w-full bg-gray-300 text-gray-600 py-2 rounded cursor-not-allowed"
+              title="Homeowner verification required before booking."
+            >
+              Verification Required
+            </button>
+          );
+        })()}
       </div>
     </div>
   );
@@ -2796,6 +2912,36 @@ useEffect(() => {
             alert('❌ The email you entered does not match the email associated with this property in our records.\n\nPlease use the email we have on file or contact Dock82 support at support@dock82.com for assistance.');
             return;
           }
+
+          // Set homeowner status to pending verification for this specific owner record
+          if (matchingOwner.id) {
+            try {
+              const response = await fetch(`${API_BASE_URL}/api/admin/users/${matchingOwner.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  homeownerStatus: 'pending_verification'
+                })
+              });
+
+              if (!response.ok) {
+                console.warn('AUTH DEBUG - Failed to set homeowner status to pending verification', await response.text());
+              } else {
+                // Optimistically update local state so admin view reflects change immediately
+                setPropertyOwners((prev) =>
+                  sortPropertyOwners(
+                    prev.map((owner) =>
+                      owner.id === matchingOwner.id
+                        ? { ...owner, homeowner_status: 'pending_verification' }
+                        : owner
+                    )
+                  )
+                );
+              }
+            } catch (statusError) {
+              console.warn('AUTH DEBUG - Error setting homeowner status to pending verification:', statusError);
+            }
+          }
         }
       }
       
@@ -2947,6 +3093,11 @@ useEffect(() => {
       }
 
       console.log('AUTH DEBUG - Signup response:', authData);
+      if (authData?.emailSent) {
+        console.log('AUTH DEBUG - Welcome email sent via Resend');
+      } else if (authData && authData.emailSent === false) {
+        console.warn('AUTH DEBUG - Welcome email was not sent:', authData.emailError || 'Unknown reason');
+      }
       
       // Check if user was created
       if (!authData || !authData.user) {
@@ -3083,7 +3234,27 @@ useEffect(() => {
       } else {
         // Email already confirmed - log them in immediately
         console.log('AUTH DEBUG - Email already confirmed, logging in');
-        setCurrentUser(userProfile);
+        const normalizedUserType = normalizeUserType(
+          userProfile.user_type || userProfile.userType || userProfile.user_role
+        );
+        const normalizedUserProfile =
+          normalizedUserType === 'homeowner'
+            ? {
+                ...userProfile,
+                homeowner_status:
+                  userProfile.homeowner_status ||
+                  userProfile.homeownerStatus ||
+                  'pending_verification',
+                homeowner_verified_at:
+                  userProfile.homeowner_verified_at || userProfile.homeownerVerifiedAt || null
+              }
+            : userProfile;
+
+        setCurrentUser(normalizedUserProfile);
+        if (normalizedUserType === 'homeowner') {
+          setHomeownerVerificationDismissed(false);
+          setHomeownerVerificationOpen(false);
+        }
         setShowLoginModal(false);
         setRegisterData({ 
           name: '', 
@@ -3259,7 +3430,7 @@ useEffect(() => {
           (user) => normalizeUserType(user.user_type || user.userType || user.user_role) === 'homeowner'
         );
         if (homeownersFromUsers.length) {
-          setPropertyOwners(homeownersFromUsers);
+          setPropertyOwners(sortPropertyOwners(homeownersFromUsers));
         }
       }
     } catch (error) {
@@ -3332,12 +3503,14 @@ useEffect(() => {
           return {
             ...prev,
             ...result.user,
-            user_type: normalizeUserType(result.user.user_type || result.user.userType || prev.user_type)
+            user_type: normalizeUserType(result.user.user_type || result.user.userType || prev.user_type),
+            homeowner_status:
+              result.user.homeowner_status || result.user.homeownerStatus || prev.homeowner_status || 'pending_verification'
           };
         });
       }
 
-      alert('✅ Homeowner information verified. Your account is now active.');
+      alert('✅ Thanks! Your homeowner details have been submitted. Dock82 will verify your account shortly.');
       setHomeownerVerificationOpen(false);
       setHomeownerVerificationDismissed(true);
       fetchHomeownerRecords();
@@ -4797,33 +4970,18 @@ useEffect(() => {
               )}
               {bookingData.userType === 'homeowner' && (
                 <div className="bg-red-100 p-4 rounded-lg border-2 border-red-300">
-                  <h3 className="text-lg font-semibold text-red-900 mb-3">🚨 REQUIRED DOCUMENTS</h3>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">📋 Homeowner Authorization Letter</label>
-                      <input
-                        type="file"
-                        accept=".pdf,.doc,.docx"
-                        onChange={(e) => setBookingData({...bookingData, homeownerAuthorizationLetter: e.target.files[0]})}
-                        className="w-full border-2 border-blue-500 rounded-md px-3 py-3 bg-blue-50"
-                        required
-                      />
-                      <p className="text-xs text-gray-600 mt-1">
-                        Please upload your homeowner authorization letter confirming your slip usage.
-                      </p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">🛡️ Proof of Home Insurance (Optional)</label>
-                      <input
-                        type="file"
-                        accept=".pdf,.doc,.docx,.jpg,.png"
-                        onChange={(e) => setBookingData({...bookingData, homeownerInsuranceProof: e.target.files[0]})}
-                        className="w-full border-2 border-blue-500 rounded-md px-3 py-3 bg-blue-50"
-                      />
-                      <p className="text-xs text-gray-600 mt-1">
-                        Optionally upload proof of insurance for additional verification.
-                      </p>
-                    </div>
+                  <h3 className="text-lg font-semibold text-red-900 mb-3">🚨 Recommended Document</h3>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">🛡️ Proof of Boat Insurance</label>
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,.jpg,.png"
+                      onChange={(e) => setBookingData({...bookingData, homeownerInsuranceProof: e.target.files[0]})}
+                      className="w-full border-2 border-blue-500 rounded-md px-3 py-3 bg-blue-50"
+                    />
+                    <p className="text-xs text-gray-600 mt-1">
+                      Optionally upload proof of boat insurance for additional verification.
+                    </p>
                   </div>
                 </div>
               )}
@@ -6129,6 +6287,11 @@ useEffect(() => {
                       </span>
                     )}
                   </h4>
+                {pendingPropertyOwnersCount > 0 && (
+                  <div className="mb-4 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+                    Pending verification owners ({pendingPropertyOwnersCount}) are highlighted at the top for review.
+                  </div>
+                )}
                   {superAdminMode && (
                     <details className="bg-white rounded-lg shadow mb-6 border border-blue-100">
                       <summary className="px-6 py-4 cursor-pointer text-blue-800 font-semibold flex items-center justify-between">
@@ -6292,8 +6455,17 @@ useEffect(() => {
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                          {propertyOwners.map((owner, index) => (
-                            <tr key={owner.id || owner.email || index} className="hover:bg-gray-50">
+                          {propertyOwners.map((owner, index) => {
+                            const statusValue = (owner.homeowner_status || '')
+                              .toString()
+                              .toLowerCase();
+                            const isPendingReview =
+                              statusValue === 'pending_verification' || statusValue === 'pending';
+                            return (
+                              <tr
+                              key={owner.id || owner.email || index}
+                              className={`hover:bg-gray-50 ${isPendingReview ? 'bg-yellow-50/60' : ''}`}
+                            >
                               <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                                 {owner.name || owner.email || 'Unnamed Owner'}
                               </td>
@@ -6364,7 +6536,8 @@ useEffect(() => {
                                 )}
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -7091,8 +7264,6 @@ useEffect(() => {
                 >
                   <option value="homeowner">Homeowner</option>
                   <option value="renter">Renter</option>
-                  <option value="admin">Admin</option>
-                  <option value="superadmin">Superadmin</option>
                 </select>
                 {propertyOwnerFormErrors.userType && (
                   <p className="text-xs text-red-600 mt-1">{propertyOwnerFormErrors.userType}</p>

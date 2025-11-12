@@ -37,7 +37,15 @@ console.log('🔑 SUPABASE_SERVICE_ROLE_KEY present:', supabaseServiceKey ? 'Yes
 console.log('🔑 SUPABASE_URL:', supabaseUrl);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-const DEFAULT_EMAIL_FROM = process.env.EMAIL_FROM || 'Dock82 <noreply@dock82.com>';
+const resolveDefaultFromAddress = () => {
+  const envFrom = process.env.EMAIL_FROM || process.env.RESEND_FROM;
+  if (envFrom && !envFrom.toLowerCase().includes('resend.dev')) {
+    return envFrom;
+  }
+  return 'noreply@dock82.com';
+};
+const DEFAULT_EMAIL_FROM = resolveDefaultFromAddress();
+console.log('📧 Using email from address:', DEFAULT_EMAIL_FROM);
 
 // Determine allowed origins for CORS
 const defaultAllowedOrigins = [
@@ -136,21 +144,22 @@ const mapAdminUserRecord = (user) => {
   }
 
   const normalizedType = normalizeUserTypeValue(user.user_type) || 'renter';
-  const permissions = user.permissions || {};
-  let homeownerStatus =
-    permissions.homeowner_status ||
-    permissions.homeownerStatus ||
-    permissions.status ||
-    null;
+  const rawStatus = sanitizeNullableString(user.homeowner_status);
+  let finalStatus = rawStatus ? rawStatus.toLowerCase() : null;
 
-  if (!homeownerStatus && normalizedType === 'homeowner') {
-    homeownerStatus = user.email_verified ? 'verified' : 'active_owner';
+  if (!finalStatus && normalizedType === 'homeowner') {
+    finalStatus = user.homeowner_verified_at || user.email_verified ? 'verified' : 'active_owner';
   }
+
+  const homeownerVerifiedAt =
+    finalStatus === 'verified'
+      ? user.homeowner_verified_at || user.updated_at || user.created_at
+      : user.homeowner_verified_at || null;
 
   return {
     ...user,
-    homeowner_status: homeownerStatus,
-    homeowner_verified_at: user.email_verified ? user.updated_at || user.created_at : null
+    homeowner_status: finalStatus,
+    homeowner_verified_at: homeownerVerifiedAt
   };
 };
 
@@ -266,12 +275,33 @@ app.post('/api/register-user', async (req, res) => {
     if (normalizedUserType) {
       updateData.user_type = normalizedUserType;
       if (normalizedUserType === 'homeowner') {
-        const alreadyVerified = existingProfile.homeowner_status === 'verified';
-        const verificationTimestamp = alreadyVerified
-          ? existingProfile.homeowner_verified_at
-          : new Date().toISOString();
-        updateData.homeowner_status = 'verified';
-        updateData.homeowner_verified_at = verificationTimestamp;
+        const existingStatus = sanitizeNullableString(existingProfile.homeowner_status);
+        const alreadyVerified = existingStatus === 'verified';
+        updateData.homeowner_status = alreadyVerified ? 'verified' : 'pending_verification';
+        updateData.homeowner_verified_at = alreadyVerified
+          ? existingProfile.homeowner_verified_at || new Date().toISOString()
+          : null;
+        const mergedPermissions = { ...(existingProfile.permissions || {}) };
+        if (updateData.homeowner_status) {
+          mergedPermissions.homeowner_status = updateData.homeowner_status;
+        } else {
+          delete mergedPermissions.homeowner_status;
+          delete mergedPermissions.homeownerStatus;
+          delete mergedPermissions.status;
+        }
+        updateData.permissions = mergedPermissions;
+      } else {
+        updateData.homeowner_status = null;
+        updateData.homeowner_verified_at = null;
+        const mergedPermissions = { ...(existingProfile.permissions || {}) };
+        delete mergedPermissions.homeowner_status;
+        delete mergedPermissions.homeownerStatus;
+        delete mergedPermissions.status;
+        if (Object.keys(mergedPermissions).length) {
+          updateData.permissions = mergedPermissions;
+        } else if (existingProfile.permissions) {
+          updateData.permissions = {};
+        }
       }
     }
 
@@ -290,8 +320,6 @@ app.post('/api/register-user', async (req, res) => {
     
     // Create user using Admin API - this bypasses email sending
     // Auto-confirm email so user can sign in immediately (we still send verification email via Resend)
-    const homeownerVerificationTimestamp = normalizedUserType === 'homeowner' ? new Date().toISOString() : null;
-
     const { data: userData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email: email,
       password: password,
@@ -303,8 +331,8 @@ app.post('/api/register-user', async (req, res) => {
         user_type: normalizedUserType,
         propertyAddress: propertyAddress || '',
         parcelNumber: parcelNumber || '',
-        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : '',
-        homeowner_verified_at: homeownerVerificationTimestamp,
+        homeownerStatus: normalizedUserType === 'homeowner' ? 'pending_verification' : '',
+        homeowner_verified_at: null,
         emergencyContact: emergencyContact || ''
       }
     });
@@ -375,8 +403,18 @@ app.post('/api/register-user', async (req, res) => {
                         phone: phone || existingProfile.phone || authUser.user_metadata?.phone,
                         propertyAddress: propertyAddress || existingProfile.property_address || authUser.user_metadata?.propertyAddress || '',
                         parcelNumber: parcelNumber || existingProfile.parcel_number || authUser.user_metadata?.parcelNumber || '',
-                        homeownerStatus: normalizedUserType === 'homeowner' ? 'verified' : authUser.user_metadata?.homeownerStatus || '',
-                        homeowner_verified_at: normalizedUserType === 'homeowner' ? verificationTimestamp : authUser.user_metadata?.homeowner_verified_at || null,
+                        homeownerStatus:
+                          normalizedUserType === 'homeowner'
+                            ? existingProfile.homeowner_status === 'verified'
+                              ? 'verified'
+                              : 'pending_verification'
+                            : authUser.user_metadata?.homeownerStatus || '',
+                        homeowner_verified_at:
+                          normalizedUserType === 'homeowner'
+                            ? existingProfile.homeowner_status === 'verified'
+                              ? verificationTimestamp
+                              : null
+                            : authUser.user_metadata?.homeowner_verified_at || null,
                         userType: normalizedUserType,
                         user_type: normalizedUserType
                       }
@@ -410,20 +448,23 @@ app.post('/api/register-user', async (req, res) => {
             console.log('📋 Profile not found in database, creating new profile...');
             
             try {
-              const profileData = {
-                name: name || email.split('@')[0],
-                email: email,
-                password_hash: 'auth_managed',
-                user_type: normalizedUserType,
-                phone: phone || '',
-                permissions: {},
-                email_verified: false,
-                property_address: propertyAddress || '',
-                parcel_number: parcelNumber || '',
-                emergency_contact: emergencyContact || '',
-                homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
-                homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
-              };
+        const profileData = {
+          name: name || email.split('@')[0],
+          email: email,
+          password_hash: 'auth_managed',
+          user_type: normalizedUserType,
+          phone: phone || '',
+          permissions:
+            normalizedUserType === 'homeowner'
+              ? { homeowner_status: 'pending_verification' }
+              : {},
+          email_verified: false,
+          property_address: propertyAddress || '',
+          parcel_number: parcelNumber || '',
+          emergency_contact: emergencyContact || '',
+          homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
+          homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
+        };
               
               const { data: newProfile, error: createProfileError } = await supabaseAdmin
                 .from('users')
@@ -446,13 +487,16 @@ app.post('/api/register-user', async (req, res) => {
           // Try to create profile anyway
           try {
             console.log('📋 Attempting to create profile after error...');
-            const profileData = {
+            const fallbackProfileData = {
               name: name || email.split('@')[0],
               email: email,
               password_hash: 'auth_managed',
               user_type: normalizedUserType,
               phone: phone || '',
-              permissions: {},
+              permissions:
+                normalizedUserType === 'homeowner'
+                  ? { homeowner_status: 'pending_verification' }
+                  : existingProfile?.permissions || {},
               email_verified: false,
               property_address: propertyAddress || '',
               parcel_number: parcelNumber || '',
@@ -463,7 +507,7 @@ app.post('/api/register-user', async (req, res) => {
             
             const { data: newProfile, error: createProfileError } = await supabaseAdmin
               .from('users')
-              .upsert(profileData, { onConflict: 'email' })
+              .upsert(fallbackProfileData, { onConflict: 'email' })
               .select()
               .single();
             
@@ -519,32 +563,16 @@ app.post('/api/register-user', async (req, res) => {
         
         // Send welcome email via Resend
         let emailSent = false;
-        if (process.env.RESEND_API_KEY) {
-          try {
-            const emailSubject = 'Welcome to Dock82!';
-            const emailContent = generateWelcomeEmail({ 
-              name: name || email.split('@')[0],
-              userType: normalizedUserType
-            });
-            
-            const { data: emailData, error: emailError } = await resend.emails.send({
-              from: DEFAULT_EMAIL_FROM,
-              to: email,
-              subject: emailSubject,
-              html: emailContent,
-            });
-            
-            if (emailError) {
-              console.error('❌ Resend error for existing user:', emailError);
-              console.error('Error details:', JSON.stringify(emailError, null, 2));
-            } else {
-              console.log('✅ Welcome email sent via Resend to existing user:', emailData?.id);
-              emailSent = true;
-            }
-          } catch (emailErr) {
-            console.error('❌ Error sending welcome email to existing user:', emailErr);
-            console.error('Error details:', emailErr.message, emailErr.stack);
-          }
+        let emailErrorDetails = null;
+        try {
+        const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
+            name: name || email.split('@')[0],
+            userType: normalizedUserType || 'renter'
+          });
+          emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
+        } catch (emailErr) {
+          console.error('❌ Error sending welcome email to existing user:', emailErr);
+          emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
         }
         
         // Return success - user exists in Auth, verification email sent
@@ -559,7 +587,8 @@ app.post('/api/register-user', async (req, res) => {
             ? 'User already exists. Welcome email sent via Resend.'
             : 'User already exists. Welcome email could not be sent.',
           existingUser: true,
-          emailSent: emailSent
+          emailSent: emailSent,
+          emailError: emailErrorDetails
         });
       }
       
@@ -579,7 +608,10 @@ app.post('/api/register-user', async (req, res) => {
         password_hash: 'auth_managed',
         user_type: normalizedUserType,
         phone: phone || '',
-        permissions: {},
+        permissions:
+          normalizedUserType === 'homeowner'
+            ? { homeowner_status: 'pending_verification' }
+            : {},
         email_verified: userData.user.email_confirmed_at !== null,
         property_address: propertyAddress || '',
         parcel_number: parcelNumber || '',
@@ -621,38 +653,17 @@ app.post('/api/register-user', async (req, res) => {
     
     // Send welcome email via Resend
     let emailSent = false;
-    if (process.env.RESEND_API_KEY) {
-      try {
-        const emailSubject = 'Welcome to Dock82!';
-        const emailContent = generateWelcomeEmail({ 
-          name: name || email.split('@')[0],
-          userType: normalizedUserType
-        });
-        
-      const { data: emailData, error: emailError } = await resend.emails.send({
-          from: DEFAULT_EMAIL_FROM,
-          to: email,
-          subject: emailSubject,
-          html: emailContent,
-        });
-        
-        if (emailError) {
-          console.error('❌ Resend error for new user:', emailError);
-          console.error('Error details:', JSON.stringify(emailError, null, 2));
-          // Log if it's a domain/recipient issue
-          if (emailError.message?.includes('testing emails') || emailError.message?.includes('verify a domain')) {
-            console.warn('⚠️  Resend is in test mode. Emails can only be sent to verified domain addresses.');
-            console.warn('⚠️  To send emails to all recipients, verify your domain at resend.com/domains');
-          }
-        } else {
-          console.log('✅ Welcome email sent via Resend:', emailData?.id);
-          emailSent = true;
-        }
-      } catch (emailErr) {
-        console.error('❌ Error sending welcome email:', emailErr);
-        console.error('Error details:', emailErr.message, emailErr.stack);
-        // Continue anyway - user can verify later
-      }
+    let emailErrorDetails = null;
+    try {
+      const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
+        name: name || email.split('@')[0],
+        userType: normalizedUserType || 'renter'
+      });
+      emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
+    } catch (emailErr) {
+      console.error('❌ Error sending welcome email:', emailErr);
+      emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+      // Continue anyway - user can verify later
     }
     
     res.json({ 
@@ -666,7 +677,8 @@ app.post('/api/register-user', async (req, res) => {
       message: emailSent 
         ? 'User created successfully. Welcome email sent via Resend.'
         : 'User created successfully. Welcome email could not be sent.',
-      emailSent: emailSent
+      emailSent: emailSent,
+      emailError: emailErrorDetails
     });
   } catch (error) {
     console.error('Registration error:', error);
@@ -724,7 +736,7 @@ app.post('/api/send-verification-email', async (req, res) => {
       });
     }
     
-    const { data: emailData, error: emailError } = await resend.emails.send({
+      const { data: emailData, error: emailError } = await resend.emails.send({
       from: DEFAULT_EMAIL_FROM,
         to: email,
         subject: emailSubject,
@@ -1282,6 +1294,10 @@ async function sendEmailNotificationInternal(type, email, data) {
       emailSubject = `Verify Your Email - Dock82`;
       emailContent = generateVerificationEmail(data);
       break;
+    case 'welcome':
+      emailSubject = `Welcome to Dock82!`;
+      emailContent = generateWelcomeEmail(data);
+      break;
     default:
       throw new Error(`Invalid email type: ${type}`);
   }
@@ -1537,14 +1553,20 @@ app.get('/api/user-profile', async (req, res) => {
         // User exists in Auth but not in users table - create profile
         console.log('📋 User exists in Auth but not in users table, creating profile...');
         
+        const profileUserType = (authUser.user_metadata?.userType || authUser.user_metadata?.user_type || 'renter').toLowerCase();
         const profileData = {
           name: authUser.user_metadata?.name || email.split('@')[0],
           email: email,
           password_hash: 'auth_managed',
-          user_type: authUser.user_metadata?.userType || authUser.user_metadata?.user_type || 'renter',
+          user_type: profileUserType,
           phone: authUser.user_metadata?.phone || '',
-          permissions: {},
-          email_verified: authUser.email_confirmed_at !== null
+          permissions:
+            profileUserType === 'homeowner'
+              ? { homeowner_status: 'pending_verification' }
+              : {},
+          email_verified: authUser.email_confirmed_at !== null,
+          homeowner_status: profileUserType === 'homeowner' ? 'pending_verification' : null,
+          homeowner_verified_at: null
         };
         
         // Normalize user_type to lowercase
@@ -2404,8 +2426,8 @@ app.post('/api/homeowners/verify', async (req, res) => {
     const updatePayload = {
       parcel_number: normalizedParcel,
       property_address: normalizedAddress,
-      homeowner_status: 'verified',
-      homeowner_verified_at: new Date().toISOString()
+      homeowner_status: 'pending_verification',
+      homeowner_verified_at: null
     };
 
     const { data: updatedHomeowner, error: updateError } = await supabaseAdmin
@@ -2430,8 +2452,8 @@ app.post('/api/homeowners/verify', async (req, res) => {
             ...authUser.user_metadata,
             parcelNumber: normalizedParcel,
             propertyAddress: normalizedAddress,
-            homeownerStatus: 'verified',
-            homeowner_verified_at: updatePayload.homeowner_verified_at
+            homeownerStatus: 'pending_verification',
+            homeowner_verified_at: null
           }
         });
 
@@ -2443,7 +2465,11 @@ app.post('/api/homeowners/verify', async (req, res) => {
       console.error('Error syncing homeowner metadata with Auth:', metadataErr);
     }
 
-    res.json({ success: true, user: updatedHomeowner });
+    res.json({
+      success: true,
+      user: updatedHomeowner,
+      message: 'Homeowner details confirmed. Dock82 will finalize your verification shortly.'
+    });
   } catch (error) {
     console.error('Error verifying homeowner:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
@@ -2458,7 +2484,9 @@ app.get('/api/admin/users', async (req, res) => {
 
     const { data: users, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, updated_at, created_at')
+      .select(
+        'id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, updated_at, created_at'
+      )
       .order('name');
 
     if (error) {
@@ -2511,13 +2539,16 @@ app.post('/api/admin/users', async (req, res) => {
     let permissions = {};
     let normalizedStatus = sanitizeNullableString(homeownerStatus);
     if (!normalizedStatus && normalizedType === 'homeowner') {
-      normalizedStatus = 'active_owner';
+      normalizedStatus = 'pending_verification';
     }
     if (normalizedStatus) {
       permissions.homeowner_status = normalizedStatus;
     }
 
     const now = new Date().toISOString();
+    const homeownerVerifiedAt =
+      normalizedStatus === 'verified' ? now : null;
+
     const insertPayload = {
       name: sanitizedName,
       email: sanitizedEmail ?? null,
@@ -2529,6 +2560,8 @@ app.post('/api/admin/users', async (req, res) => {
       password_hash: 'manual_import',
       permissions,
       email_verified: false,
+      homeowner_status: normalizedType === 'homeowner' ? normalizedStatus : null,
+      homeowner_verified_at: normalizedType === 'homeowner' ? homeownerVerifiedAt : null,
       created_at: now,
       updated_at: now
     };
@@ -2536,7 +2569,7 @@ app.post('/api/admin/users', async (req, res) => {
     const { data: insertedUser, error: insertError } = await supabaseAdmin
       .from('users')
       .insert(insertPayload)
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
       .single();
 
     if (insertError) {
@@ -2578,7 +2611,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
 
     const { data: existingUser, error: fetchError } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
       .eq('id', id)
       .single();
 
@@ -2649,13 +2682,21 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       }
 
       updatePayload.permissions = permissions;
+
+      if (normalizeUserTypeValue(existingUser.user_type) === 'homeowner') {
+        updatePayload.homeowner_status = sanitizedStatus || null;
+        updatePayload.homeowner_verified_at =
+          sanitizedStatus && ['verified', 'active_owner', 'active'].includes(sanitizedStatus)
+            ? new Date().toISOString()
+            : null;
+      }
     }
 
     const { data: updatedUser, error: updateError } = await supabaseAdmin
       .from('users')
       .update(updatePayload)
       .eq('id', id)
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
       .single();
 
     if (updateError) {
