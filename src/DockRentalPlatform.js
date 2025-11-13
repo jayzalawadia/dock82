@@ -277,13 +277,6 @@ const DockRentalPlatform = () => {
   const [propertyOwnerSaving, setPropertyOwnerSaving] = useState(false);
   const [propertyOwnerFormErrors, setPropertyOwnerFormErrors] = useState({});
   const [propertyOwnerDeletingId, setPropertyOwnerDeletingId] = useState(null);
-  const [homeownerVerificationOpen, setHomeownerVerificationOpen] = useState(false);
-  const [homeownerVerificationDismissed, setHomeownerVerificationDismissed] = useState(false);
-  const [homeownerVerificationData, setHomeownerVerificationData] = useState({
-    propertyAddress: '',
-    parcelNumber: ''
-  });
-  const [homeownerVerificationSubmitting, setHomeownerVerificationSubmitting] = useState(false);
   const normalizeUserType = useCallback((value) => {
     if (!value) return 'renter';
     return value.toString().toLowerCase();
@@ -430,41 +423,6 @@ const DockRentalPlatform = () => {
   useEffect(() => {
     fetchHomeownerRecords();
   }, [fetchHomeownerRecords]);
-
-useEffect(() => {
-    if (!currentUser) {
-      setHomeownerVerificationOpen(false);
-      setHomeownerVerificationDismissed(false);
-      return;
-    }
-
-    const userType = normalizeUserType(currentUser.user_type || currentUser.userType || currentUser.user_role);
-    if (userType === 'homeowner') {
-      const homeownerStatus = (currentUser.homeowner_status || currentUser.homeownerStatus || '').toLowerCase();
-      const propertyAddressValue = currentUser.property_address || currentUser.propertyAddress || '';
-      const parcelNumberValue = currentUser.parcel_number || currentUser.parcelNumber || '';
-      const isMissingDetails = !propertyAddressValue || !parcelNumberValue;
-      const shouldPromptForDetails =
-        !homeownerVerificationDismissed && homeownerStatus !== 'verified' && isMissingDetails;
-
-      if (shouldPromptForDetails) {
-        setHomeownerVerificationData({
-          propertyAddress: propertyAddressValue,
-          parcelNumber: parcelNumberValue
-        });
-        setHomeownerVerificationOpen(true);
-        fetchHomeownerRecords();
-      } else {
-        setHomeownerVerificationOpen(false);
-        if (homeownerStatus === 'verified') {
-          setHomeownerVerificationDismissed(true);
-        }
-      }
-    } else {
-      setHomeownerVerificationOpen(false);
-      setHomeownerVerificationDismissed(true);
-    }
-  }, [currentUser, fetchHomeownerRecords, normalizeUserType, homeownerVerificationDismissed]);
 
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((notification) => !notification.readAt).length,
@@ -3251,10 +3209,6 @@ useEffect(() => {
             : userProfile;
 
         setCurrentUser(normalizedUserProfile);
-        if (normalizedUserType === 'homeowner') {
-          setHomeownerVerificationDismissed(false);
-          setHomeownerVerificationOpen(false);
-        }
         setShowLoginModal(false);
         setRegisterData({ 
           name: '', 
@@ -3447,78 +3401,6 @@ useEffect(() => {
       }
     } catch (error) {
       console.error('Error loading admins:', error);
-    }
-  };
-
-  const handleSubmitHomeownerVerification = async (event) => {
-    event.preventDefault();
-    if (!currentUser) return;
-
-    const propertyAddressValue = (homeownerVerificationData.propertyAddress || '').trim();
-    const parcelNumberValue = (homeownerVerificationData.parcelNumber || '').trim();
-
-    if (!propertyAddressValue || !parcelNumberValue) {
-      alert('Please select your property address and enter the parcel number to continue.');
-      return;
-    }
-
-    if (propertyOwners.length) {
-      const matchingOwner = propertyOwners.find(
-        (owner) => (owner.property_address || '').trim().toLowerCase() === propertyAddressValue.toLowerCase()
-      );
-
-      if (!matchingOwner) {
-        alert('The selected property address is not recognized. Please contact Dock82 support for assistance.');
-        return;
-      }
-
-      const recordedParcel = (matchingOwner.parcel_number || '').trim();
-      if (recordedParcel && recordedParcel !== parcelNumberValue) {
-        alert('The parcel number does not match our records. Please verify and try again or contact support.');
-        return;
-      }
-    }
-
-    setHomeownerVerificationSubmitting(true);
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/homeowners/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: currentUser.email,
-          parcelNumber: parcelNumberValue,
-          propertyAddress: propertyAddressValue
-        })
-      });
-
-      const result = await response.json().catch(() => ({}));
-
-      if (!response.ok || !result.success) {
-        throw new Error(result.error || 'Failed to verify homeowner information.');
-      }
-
-      if (result.user) {
-        setCurrentUser((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            ...result.user,
-            user_type: normalizeUserType(result.user.user_type || result.user.userType || prev.user_type),
-            homeowner_status:
-              result.user.homeowner_status || result.user.homeownerStatus || prev.homeowner_status || 'pending_verification'
-          };
-        });
-      }
-
-      alert('✅ Thanks! Your homeowner details have been submitted. Dock82 will verify your account shortly.');
-      setHomeownerVerificationOpen(false);
-      setHomeownerVerificationDismissed(true);
-      fetchHomeownerRecords();
-    } catch (error) {
-      console.error('Error verifying homeowner:', error);
-      alert(error.message || 'Failed to verify homeowner. Please try again or contact support.');
-    } finally {
-      setHomeownerVerificationSubmitting(false);
     }
   };
 
@@ -7442,100 +7324,6 @@ useEffect(() => {
           </div>
         </div>
       )}
-
-      {homeownerVerificationOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-xl space-y-4 shadow-xl">
-            <div className="flex items-start justify-between">
-              <div>
-                <h2 className="text-xl font-semibold text-gray-900">Verify Homeowner Details</h2>
-                <p className="text-sm text-gray-600 mt-1">
-                  Please confirm your property address and parcel number to activate your homeowner access.
-                </p>
-              </div>
-            </div>
-
-            <form onSubmit={handleSubmitHomeownerVerification} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Property Address</label>
-                {propertyOwnersLoading ? (
-                  <p className="text-sm text-gray-500">Loading property addresses...</p>
-                ) : homeownerAddressOptions.length > 0 ? (
-                  <select
-                    value={homeownerVerificationData.propertyAddress}
-                    onChange={(e) =>
-                      setHomeownerVerificationData((prev) => ({
-                        ...prev,
-                        propertyAddress: e.target.value
-                      }))
-                    }
-                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    required
-                  >
-                    <option value="">Select your property</option>
-                    {homeownerAddressOptions.map((address) => (
-                      <option key={address} value={address}>
-                        {address}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={homeownerVerificationData.propertyAddress}
-                    onChange={(e) =>
-                      setHomeownerVerificationData((prev) => ({
-                        ...prev,
-                        propertyAddress: e.target.value
-                      }))
-                    }
-                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    placeholder="Enter your property address"
-                    required
-                  />
-                )}
-                {propertyOwnersError && (
-                  <p className="text-xs text-red-600 mt-1">{propertyOwnersError}</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Parcel Number</label>
-                <input
-                  type="text"
-                  value={homeownerVerificationData.parcelNumber}
-                  onChange={(e) =>
-                    setHomeownerVerificationData((prev) => ({
-                      ...prev,
-                      parcelNumber: e.target.value
-                    }))
-                  }
-                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Enter the parcel number associated with your property"
-                  required
-                />
-              </div>
-
-              <div className="flex items-center justify-between text-sm text-gray-500 bg-blue-50 border border-blue-100 rounded-md p-3">
-                <p>Need help? Contact Dock82 support at <a href="mailto:support@dock82.com" className="text-blue-600 hover:text-blue-800">support@dock82.com</a>.</p>
-              </div>
-
-              <div className="flex justify-end space-x-3 pt-2">
-                <button
-                  type="submit"
-                  disabled={homeownerVerificationSubmitting}
-                  className={`px-4 py-2 rounded-md text-white font-medium ${
-                    homeownerVerificationSubmitting ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  {homeownerVerificationSubmitting ? 'Verifying...' : 'Verify & Continue'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Profile Edit Modal */}
       {showProfileModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4 py-6 overflow-y-auto">
