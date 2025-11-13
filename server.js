@@ -138,26 +138,86 @@ const normalizeUserTypeValue = (value) => {
   return sanitized ? sanitized.toLowerCase() : null;
 };
 
+const parsePermissions = (value) => {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return { ...value };
+  }
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch (error) {
+      console.warn('Failed to parse permissions JSON:', error);
+      return {};
+    }
+  }
+  return {};
+};
+
+const extractStatusFromPermissions = (permissions = {}) => {
+  const raw = sanitizeNullableString(
+    permissions.homeowner_status ??
+      permissions.homeownerStatus ??
+      permissions.status
+  );
+  return raw ? raw.toLowerCase() : null;
+};
+
+const extractVerifiedAtFromPermissions = (permissions = {}) =>
+  permissions.homeowner_verified_at ??
+  permissions.homeownerVerifiedAt ??
+  null;
+
+const applyHomeownerStatusToPermissions = (
+  permissions = {},
+  status,
+  verifiedAt = null
+) => {
+  const next = { ...permissions };
+  if (status) {
+    next.homeowner_status = status;
+    if (verifiedAt) {
+      next.homeowner_verified_at = verifiedAt;
+    } else {
+      delete next.homeowner_verified_at;
+      delete next.homeownerVerifiedAt;
+    }
+  } else {
+    delete next.homeowner_status;
+    delete next.homeownerStatus;
+    delete next.status;
+    delete next.homeowner_verified_at;
+    delete next.homeownerVerifiedAt;
+  }
+  return next;
+};
+
 const mapAdminUserRecord = (user) => {
   if (!user) {
     return user;
   }
 
+  const permissions = parsePermissions(user.permissions);
   const normalizedType = normalizeUserTypeValue(user.user_type) || 'renter';
-  const rawStatus = sanitizeNullableString(user.homeowner_status);
-  let finalStatus = rawStatus ? rawStatus.toLowerCase() : null;
+  const columnStatus = sanitizeNullableString(user.homeowner_status);
+  let finalStatus = columnStatus ? columnStatus.toLowerCase() : null;
 
   if (!finalStatus && normalizedType === 'homeowner') {
-    finalStatus = user.homeowner_verified_at || user.email_verified ? 'verified' : 'active_owner';
+    finalStatus = extractStatusFromPermissions(permissions) || 'active_owner';
+  }
+
+  if (!finalStatus) {
+    finalStatus = extractStatusFromPermissions(permissions);
   }
 
   const homeownerVerifiedAt =
-    finalStatus === 'verified'
-      ? user.homeowner_verified_at || user.updated_at || user.created_at
-      : user.homeowner_verified_at || null;
+    extractVerifiedAtFromPermissions(permissions) ||
+    user.homeowner_verified_at ||
+    null;
 
   return {
     ...user,
+    permissions,
     homeowner_status: finalStatus,
     homeowner_verified_at: homeownerVerifiedAt
   };
@@ -274,34 +334,23 @@ app.post('/api/register-user', async (req, res) => {
 
     if (normalizedUserType) {
       updateData.user_type = normalizedUserType;
+      const existingPermissions = parsePermissions(existingProfile.permissions);
       if (normalizedUserType === 'homeowner') {
-        const existingStatus = sanitizeNullableString(existingProfile.homeowner_status);
+        const existingStatus =
+          sanitizeNullableString(existingProfile.homeowner_status) ||
+          extractStatusFromPermissions(existingPermissions);
         const alreadyVerified = existingStatus === 'verified';
-        updateData.homeowner_status = alreadyVerified ? 'verified' : 'pending_verification';
-        updateData.homeowner_verified_at = alreadyVerified
-          ? existingProfile.homeowner_verified_at || new Date().toISOString()
+        const nextStatus = alreadyVerified ? 'verified' : 'pending_verification';
+        const verificationTimestamp = alreadyVerified
+          ? extractVerifiedAtFromPermissions(existingPermissions) || new Date().toISOString()
           : null;
-        const mergedPermissions = { ...(existingProfile.permissions || {}) };
-        if (updateData.homeowner_status) {
-          mergedPermissions.homeowner_status = updateData.homeowner_status;
-        } else {
-          delete mergedPermissions.homeowner_status;
-          delete mergedPermissions.homeownerStatus;
-          delete mergedPermissions.status;
-        }
-        updateData.permissions = mergedPermissions;
+        updateData.permissions = applyHomeownerStatusToPermissions(
+          existingPermissions,
+          nextStatus,
+          verificationTimestamp
+        );
       } else {
-        updateData.homeowner_status = null;
-        updateData.homeowner_verified_at = null;
-        const mergedPermissions = { ...(existingProfile.permissions || {}) };
-        delete mergedPermissions.homeowner_status;
-        delete mergedPermissions.homeownerStatus;
-        delete mergedPermissions.status;
-        if (Object.keys(mergedPermissions).length) {
-          updateData.permissions = mergedPermissions;
-        } else if (existingProfile.permissions) {
-          updateData.permissions = {};
-        }
+        updateData.permissions = applyHomeownerStatusToPermissions(existingPermissions, null);
       }
     }
 
@@ -359,12 +408,16 @@ app.post('/api/register-user', async (req, res) => {
         
         // First, check if user exists in users table with the requested user type
         try {
-          const { data: existingProfile, error: profileCheckError } = await supabaseAdmin
+          const { data: existingProfileRaw, error: profileCheckError } = await supabaseAdmin
             .from('users')
             .select('*')
             .eq('email', email)
             .single();
           
+          const existingProfile = existingProfileRaw
+            ? mapAdminUserRecord(existingProfileRaw)
+            : null;
+
           if (existingProfile && !profileCheckError) {
             console.log('📋 User profile exists in database:', existingProfile.user_type);
             
@@ -448,23 +501,21 @@ app.post('/api/register-user', async (req, res) => {
             console.log('📋 Profile not found in database, creating new profile...');
             
             try {
-        const profileData = {
-          name: name || email.split('@')[0],
-          email: email,
-          password_hash: 'auth_managed',
-          user_type: normalizedUserType,
-          phone: phone || '',
-          permissions:
-            normalizedUserType === 'homeowner'
-              ? { homeowner_status: 'pending_verification' }
-              : {},
-          email_verified: false,
-          property_address: propertyAddress || '',
-          parcel_number: parcelNumber || '',
-          emergency_contact: emergencyContact || '',
-          homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
-          homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
-        };
+            const profileData = {
+              name: name || email.split('@')[0],
+              email: email,
+              password_hash: 'auth_managed',
+              user_type: normalizedUserType,
+              phone: phone || '',
+              permissions:
+                normalizedUserType === 'homeowner'
+                  ? { homeowner_status: 'pending_verification' }
+                  : {},
+              email_verified: false,
+              property_address: propertyAddress || '',
+              parcel_number: parcelNumber || '',
+              emergency_contact: emergencyContact || ''
+            };
               
               const { data: newProfile, error: createProfileError } = await supabaseAdmin
                 .from('users')
@@ -500,9 +551,7 @@ app.post('/api/register-user', async (req, res) => {
               email_verified: false,
               property_address: propertyAddress || '',
               parcel_number: parcelNumber || '',
-              emergency_contact: emergencyContact || '',
-              homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : existingProfile?.homeowner_status || null,
-              homeowner_verified_at: normalizedUserType === 'homeowner' ? null : existingProfile?.homeowner_verified_at || null
+              emergency_contact: emergencyContact || ''
             };
             
             const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -615,9 +664,7 @@ app.post('/api/register-user', async (req, res) => {
         email_verified: userData.user.email_confirmed_at !== null,
         property_address: propertyAddress || '',
         parcel_number: parcelNumber || '',
-        emergency_contact: emergencyContact || '',
-        homeowner_status: normalizedUserType === 'homeowner' ? 'pending_verification' : null,
-        homeowner_verified_at: normalizedUserType === 'homeowner' ? null : null
+        emergency_contact: emergencyContact || ''
       };
       
       const { data: profileResult, error: profileError } = await supabaseAdmin
@@ -1541,7 +1588,7 @@ app.get('/api/user-profile', async (req, res) => {
     
     if (existingProfile && !fetchError) {
       // Profile found
-      return res.json({ success: true, profile: existingProfile });
+      return res.json({ success: true, profile: mapAdminUserRecord(existingProfile) });
     }
     
     // Profile not found - check if user exists in Auth, and create profile if so
@@ -1564,9 +1611,7 @@ app.get('/api/user-profile', async (req, res) => {
             profileUserType === 'homeowner'
               ? { homeowner_status: 'pending_verification' }
               : {},
-          email_verified: authUser.email_confirmed_at !== null,
-          homeowner_status: profileUserType === 'homeowner' ? 'pending_verification' : null,
-          homeowner_verified_at: null
+          email_verified: authUser.email_confirmed_at !== null
         };
         
         // Normalize user_type to lowercase
@@ -1594,11 +1639,11 @@ app.get('/api/user-profile', async (req, res) => {
             return res.json({ success: false, profile: null, message: 'User profile not found and could not be created' });
           }
           
-          return res.json({ success: true, profile: upsertProfile, created: true });
+          return res.json({ success: true, profile: mapAdminUserRecord(upsertProfile), created: true });
         }
         
         console.log('✅ Profile created from Auth user:', newProfile);
-        return res.json({ success: true, profile: newProfile, created: true });
+        return res.json({ success: true, profile: mapAdminUserRecord(newProfile), created: true });
       }
     } catch (authErr) {
       console.error('Error checking Auth for user:', authErr);
@@ -2360,7 +2405,7 @@ app.get('/api/homeowners/records', async (req, res) => {
 
     const { data: homeowners, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type, phone, property_address, parcel_number, homeowner_status, homeowner_verified_at, emergency_contact')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, emergency_contact, created_at, updated_at')
       .eq('user_type', 'homeowner')
       .order('property_address', { ascending: true });
 
@@ -2369,7 +2414,10 @@ app.get('/api/homeowners/records', async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch homeowners', details: error.message });
     }
 
-    res.json({ success: true, homeowners: homeowners || [] });
+    res.json({
+      success: true,
+      homeowners: (homeowners || []).map(mapAdminUserRecord)
+    });
   } catch (error) {
     console.error('Error fetching homeowner records:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
@@ -2423,11 +2471,12 @@ app.post('/api/homeowners/verify', async (req, res) => {
       });
     }
 
+    const existingPermissions = parsePermissions(homeowner.permissions);
     const updatePayload = {
       parcel_number: normalizedParcel,
       property_address: normalizedAddress,
-      homeowner_status: 'pending_verification',
-      homeowner_verified_at: null
+      permissions: applyHomeownerStatusToPermissions(existingPermissions, 'pending_verification'),
+      updated_at: new Date().toISOString()
     };
 
     const { data: updatedHomeowner, error: updateError } = await supabaseAdmin
@@ -2467,7 +2516,7 @@ app.post('/api/homeowners/verify', async (req, res) => {
 
     res.json({
       success: true,
-      user: updatedHomeowner,
+      user: mapAdminUserRecord(updatedHomeowner),
       message: 'Homeowner details confirmed. Dock82 will finalize your verification shortly.'
     });
   } catch (error) {
@@ -2485,7 +2534,7 @@ app.get('/api/admin/users', async (req, res) => {
     const { data: users, error } = await supabaseAdmin
       .from('users')
       .select(
-        'id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, updated_at, created_at'
+        'id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, updated_at, created_at'
       )
       .order('name');
 
@@ -2536,18 +2585,20 @@ app.post('/api/admin/users', async (req, res) => {
       return res.status(400).json({ error: 'Invalid user type' });
     }
 
+    const now = new Date().toISOString();
     let permissions = {};
     let normalizedStatus = sanitizeNullableString(homeownerStatus);
     if (!normalizedStatus && normalizedType === 'homeowner') {
       normalizedStatus = 'pending_verification';
     }
-    if (normalizedStatus) {
-      permissions.homeowner_status = normalizedStatus;
+    if (normalizedType === 'homeowner') {
+      const verifiedAt = normalizedStatus === 'verified' ? now : null;
+      permissions = applyHomeownerStatusToPermissions(
+        permissions,
+        normalizedStatus,
+        verifiedAt
+      );
     }
-
-    const now = new Date().toISOString();
-    const homeownerVerifiedAt =
-      normalizedStatus === 'verified' ? now : null;
 
     const insertPayload = {
       name: sanitizedName,
@@ -2560,8 +2611,6 @@ app.post('/api/admin/users', async (req, res) => {
       password_hash: 'manual_import',
       permissions,
       email_verified: false,
-      homeowner_status: normalizedType === 'homeowner' ? normalizedStatus : null,
-      homeowner_verified_at: normalizedType === 'homeowner' ? homeownerVerifiedAt : null,
       created_at: now,
       updated_at: now
     };
@@ -2569,7 +2618,7 @@ app.post('/api/admin/users', async (req, res) => {
     const { data: insertedUser, error: insertError } = await supabaseAdmin
       .from('users')
       .insert(insertPayload)
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
       .single();
 
     if (insertError) {
@@ -2609,11 +2658,13 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       homeownerStatus
     } = req.body || {};
 
-    const { data: existingUser, error: fetchError } = await supabaseAdmin
+    const { data: existingUserRaw, error: fetchError } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
+      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
       .eq('id', id)
       .single();
+
+    const existingUser = existingUserRaw ? mapAdminUserRecord(existingUserRaw) : null;
 
     if (fetchError || !existingUser) {
       console.error('Error loading user for update:', fetchError);
@@ -2621,6 +2672,8 @@ app.patch('/api/admin/users/:id', async (req, res) => {
     }
 
     const updatePayload = { updated_at: new Date().toISOString() };
+    let permissionsWorking = parsePermissions(existingUser.permissions);
+    let permissionsModified = false;
 
     if (name !== undefined) {
       const sanitizedName = sanitizeNullableString(name);
@@ -2666,37 +2719,41 @@ app.patch('/api/admin/users/:id', async (req, res) => {
         return res.status(400).json({ error: 'Invalid user type' });
       }
       updatePayload.user_type = normalized;
+      if (normalized !== 'homeowner') {
+        permissionsWorking = applyHomeownerStatusToPermissions(permissionsWorking, null);
+        permissionsModified = true;
+      }
     }
 
     if (homeownerStatus !== undefined) {
-      let permissions = existingUser.permissions || {};
       const sanitizedStatus = sanitizeNullableString(homeownerStatus);
-      permissions = { ...permissions };
-
-      if (sanitizedStatus) {
-        permissions.homeowner_status = sanitizedStatus;
-      } else {
-        delete permissions.homeowner_status;
-        delete permissions.homeownerStatus;
-        delete permissions.status;
-      }
-
-      updatePayload.permissions = permissions;
-
-      if (normalizeUserTypeValue(existingUser.user_type) === 'homeowner') {
-        updatePayload.homeowner_status = sanitizedStatus || null;
-        updatePayload.homeowner_verified_at =
+      const isHomeowner = normalizeUserTypeValue(existingUser.user_type) === 'homeowner';
+      if (isHomeowner) {
+        const verifiedAt =
           sanitizedStatus && ['verified', 'active_owner', 'active'].includes(sanitizedStatus)
             ? new Date().toISOString()
             : null;
+        permissionsWorking = applyHomeownerStatusToPermissions(
+          permissionsWorking,
+          sanitizedStatus || null,
+          verifiedAt
+        );
+        permissionsModified = true;
+      } else {
+        permissionsWorking = applyHomeownerStatusToPermissions(permissionsWorking, null);
+        permissionsModified = true;
       }
+    }
+
+    if (permissionsModified) {
+      updatePayload.permissions = permissionsWorking;
     }
 
     const { data: updatedUser, error: updateError } = await supabaseAdmin
       .from('users')
       .update(updatePayload)
       .eq('id', id)
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, homeowner_status, homeowner_verified_at, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
       .single();
 
     if (updateError) {
@@ -2753,7 +2810,7 @@ app.get('/api/admin/admins', async (req, res) => {
 
     const { data: admins, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
       .in('user_type', ['admin', 'superadmin'])
       .order('name');
 
@@ -2762,7 +2819,7 @@ app.get('/api/admin/admins', async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch admins', details: error.message });
     }
 
-    res.json({ success: true, admins: admins || [] });
+    res.json({ success: true, admins: (admins || []).map(mapAdminUserRecord) });
   } catch (error) {
     console.error('Error fetching admins:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });

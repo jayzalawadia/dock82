@@ -25,6 +25,24 @@ console.log('Using Stripe key:', (process.env.REACT_APP_STRIPE_PUBLISHABLE_KEY |
 console.log('Stripe Key:', process.env.REACT_APP_STRIPE_PUBLISHABLE_KEY);
 console.log('Stripe Promise:', stripePromise);
 
+const defaultAdminPermissions = {
+  manage_slips: true,
+  manage_bookings: true,
+  view_analytics: true,
+  manage_users: false,
+  manage_admins: false,
+  system_settings: false
+};
+
+const buildDefaultAdminForm = () => ({
+  name: '',
+  email: '',
+  password: '',
+  phone: '',
+  userType: 'admin',
+  permissions: { ...defaultAdminPermissions }
+});
+
 const DockRentalPlatform = () => {
   const [currentView, setCurrentView] = useState(null); // Start with null, will be set based on auth
   const [selectedSlip, setSelectedSlip] = useState(null);
@@ -75,22 +93,14 @@ const DockRentalPlatform = () => {
   const [expandedNotificationId, setExpandedNotificationId] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [allAdmins, setAllAdmins] = useState([]);
-  const [showAdminManagement, setShowAdminManagement] = useState(false);
-  const [newAdminData, setNewAdminData] = useState({
-    name: '',
-    email: '',
-    password: '',
-    phone: '',
-    userType: 'admin',
-    permissions: {
-      manage_slips: true,
-      manage_bookings: true,
-      view_analytics: true,
-      manage_users: false,
-      manage_admins: false,
-      system_settings: false
-    }
-  });
+  const [newAdminData, setNewAdminData] = useState(buildDefaultAdminForm);
+  const [newAdminErrors, setNewAdminErrors] = useState({});
+  const [adminSubmitting, setAdminSubmitting] = useState(false);
+  const [editingAdmin, setEditingAdmin] = useState(null);
+  const [editingAdminErrors, setEditingAdminErrors] = useState({});
+  const [showAdminEditModal, setShowAdminEditModal] = useState(false);
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminDeletingId, setAdminDeletingId] = useState(null);
   const [showPermit, setShowPermit] = useState(null);
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [showCancellationModal, setShowCancellationModal] = useState(null);
@@ -281,6 +291,27 @@ const DockRentalPlatform = () => {
     if (!value) return 'renter';
     return value.toString().toLowerCase();
   }, []);
+  const formatUserTypeLabel = useCallback(
+    (value) => {
+      const normalized = normalizeUserType(value);
+      switch (normalized) {
+        case 'superadmin':
+          return 'Superadmin';
+        case 'admin':
+          return 'Admin';
+        case 'homeowner':
+          return 'Homeowner';
+        case 'renter':
+          return 'Renter';
+        default:
+          if (!normalized) {
+            return 'Unknown';
+          }
+          return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+      }
+    },
+    [normalizeUserType]
+  );
   const sortPropertyOwners = useCallback((owners = []) => {
     const priorityForOwner = (owner) => {
       const status = (owner?.homeowner_status || owner?.permissions?.homeowner_status || '')
@@ -307,6 +338,63 @@ const DockRentalPlatform = () => {
       return 0;
     });
   }, []);
+  const sortAdmins = useCallback(
+    (admins = []) => {
+      const getPriority = (admin) => {
+        const normalized = normalizeUserType(admin?.user_type || admin?.userType || admin?.user_role);
+        return normalized === 'superadmin' ? 0 : 1;
+      };
+
+      return [...admins].sort((a, b) => {
+        const priorityDiff = getPriority(a) - getPriority(b);
+        if (priorityDiff !== 0) {
+          return priorityDiff;
+        }
+
+        const nameA = (a?.name || a?.email || '').toString().toLowerCase();
+        const nameB = (b?.name || b?.email || '').toString().toLowerCase();
+        if (nameA < nameB) return -1;
+        if (nameA > nameB) return 1;
+        return 0;
+      });
+    },
+    [normalizeUserType]
+  );
+  const loadAllUsers = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/admin/users`);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData?.error || 'Failed to fetch users');
+      }
+
+      const data = await response.json();
+      const usersList = data.users || [];
+      setAllUsers(usersList);
+      const homeownersFromUsers = usersList.filter(
+        (user) => normalizeUserType(user.user_type || user.userType || user.user_role) === 'homeowner'
+      );
+      if (homeownersFromUsers.length) {
+        setPropertyOwners(sortPropertyOwners(homeownersFromUsers));
+      }
+    } catch (error) {
+      console.error('Error loading users:', error);
+    }
+  }, [API_BASE_URL, normalizeUserType, sortPropertyOwners]);
+  const loadAllAdmins = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/admin/admins`);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData?.error || 'Failed to fetch admins');
+      }
+
+      const data = await response.json();
+      setAllAdmins(sortAdmins(data.admins || []));
+    } catch (error) {
+      console.error('Error loading admins:', error);
+    }
+  }, [API_BASE_URL, sortAdmins]);
   const fetchHomeownerRecords = useCallback(async () => {
     setPropertyOwnersLoading(true);
     setPropertyOwnersError(null);
@@ -597,6 +685,7 @@ const DockRentalPlatform = () => {
     event.preventDefault();
 
     const errors = {};
+    const normalizedOwnerUserType = normalizeUserType(newPropertyOwnerForm.userType || 'homeowner');
     if (!newPropertyOwnerForm.name.trim()) {
       errors.name = 'Name is required';
     }
@@ -608,6 +697,8 @@ const DockRentalPlatform = () => {
     }
     if (!newPropertyOwnerForm.userType) {
       errors.userType = 'User type is required';
+    } else if (!['homeowner', 'renter'].includes(normalizedOwnerUserType)) {
+      errors.userType = 'Property owners can only be homeowners or renters';
     }
 
     if (Object.keys(errors).length > 0) {
@@ -634,7 +725,7 @@ const DockRentalPlatform = () => {
         parcelNumber: sanitizeValue(newPropertyOwnerForm.parcelNumber),
         lotNumber: sanitizeValue(newPropertyOwnerForm.lotNumber),
         homeownerStatus: sanitizeValue(newPropertyOwnerForm.homeownerStatus),
-        userType: newPropertyOwnerForm.userType
+        userType: normalizedOwnerUserType
       };
 
       const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
@@ -704,6 +795,59 @@ const DockRentalPlatform = () => {
   },
     [API_BASE_URL, fetchHomeownerRecords, sortPropertyOwners]
   );
+  const resetNewAdminForm = useCallback(() => {
+    setNewAdminData(buildDefaultAdminForm());
+    setNewAdminErrors({});
+    setAdminSubmitting(false);
+  }, []);
+  const handleNewAdminInput = useCallback((field, value) => {
+    setNewAdminData((prev) => ({
+      ...prev,
+      [field]: value
+    }));
+    setNewAdminErrors((prev) => {
+      if (!prev || !Object.prototype.hasOwnProperty.call(prev, field)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }, []);
+  const handleEditAdmin = useCallback(
+    (admin) => {
+      if (!admin) return;
+
+      setEditingAdmin({
+        id: admin.id,
+        name: admin.name || '',
+        email: admin.email || '',
+        phone: admin.phone || '',
+        userType: normalizeUserType(admin.user_type || admin.userType || admin.user_role || 'admin')
+      });
+      setEditingAdminErrors({});
+      setAdminSaving(false);
+      setShowAdminEditModal(true);
+    },
+    [normalizeUserType]
+  );
+  const handleCloseAdminModal = useCallback(() => {
+    setShowAdminEditModal(false);
+    setEditingAdmin(null);
+    setEditingAdminErrors({});
+    setAdminSaving(false);
+  }, []);
+  const updateEditingAdmin = useCallback((field, value) => {
+    setEditingAdmin((prev) => (prev ? { ...prev, [field]: value } : prev));
+    setEditingAdminErrors((prev) => {
+      if (!prev || !Object.prototype.hasOwnProperty.call(prev, field)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }, []);
   const deriveHomeownerStatus = useCallback(
     (owner) => {
       if (!owner) {
@@ -1260,6 +1404,18 @@ const DockRentalPlatform = () => {
       setNotifications([]);
     }
   }, [currentUser?.id, fetchNotifications]);
+  useEffect(() => {
+    if (superAdminMode) {
+      loadAllAdmins();
+    } else {
+      setAllAdmins([]);
+    }
+  }, [superAdminMode, loadAllAdmins]);
+  useEffect(() => {
+    if (adminView === 'users' && superAdminMode && allAdmins.length === 0) {
+      loadAllAdmins();
+    }
+  }, [adminView, superAdminMode, allAdmins.length, loadAllAdmins]);
 
   useEffect(() => {
     if (currentView === 'notifications' && adminMode && allUsers.length === 0) {
@@ -2489,15 +2645,15 @@ const DockRentalPlatform = () => {
 
           if (homeownerVerified) {
             return (
-              <button
-                onClick={() => {
-                  setSelectedSlip(slip);
-                  setCurrentView('booking');
-                }}
-                className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 transition-colors"
-              >
-                Book This Slip
-              </button>
+          <button
+            onClick={() => {
+              setSelectedSlip(slip);
+              setCurrentView('booking');
+            }}
+            className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 transition-colors"
+          >
+            Book This Slip
+          </button>
             );
           }
 
@@ -3373,88 +3529,211 @@ const DockRentalPlatform = () => {
     }
   };
 
-  const loadAllUsers = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/admin/users`);
-      if (response.ok) {
-        const data = await response.json();
-        const usersList = data.users || [];
-        setAllUsers(usersList);
-        const homeownersFromUsers = usersList.filter(
-          (user) => normalizeUserType(user.user_type || user.userType || user.user_role) === 'homeowner'
-        );
-        if (homeownersFromUsers.length) {
-          setPropertyOwners(sortPropertyOwners(homeownersFromUsers));
-        }
-      }
-    } catch (error) {
-      console.error('Error loading users:', error);
-    }
-  };
+  const handleCreateAdmin = async (event) => {
+    event.preventDefault();
 
-  const loadAllAdmins = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/admin/admins`);
-      if (response.ok) {
-        const data = await response.json();
-        setAllAdmins(data.admins || []);
-      }
-    } catch (error) {
-      console.error('Error loading admins:', error);
-    }
-  };
+    const errors = {};
+    const nameValue = (newAdminData.name || '').trim();
+    const emailValue = (newAdminData.email || '').trim();
+    const passwordValue = newAdminData.password || '';
+    const userTypeValue = normalizeUserType(newAdminData.userType || 'admin');
 
-  const handleCreateAdmin = async (e) => {
-    e.preventDefault();
-    
-    if (!newAdminData.name || !newAdminData.email || !newAdminData.password) {
-      alert('Please fill in all required fields.');
+    if (!nameValue) {
+      errors.name = 'Name is required';
+    }
+    if (!emailValue) {
+      errors.email = 'Email is required';
+    } else {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(emailValue)) {
+        errors.email = 'Please enter a valid email address';
+      }
+    }
+    if (!passwordValue.trim()) {
+      errors.password = 'Temporary password is required';
+    }
+    if (!userTypeValue) {
+      errors.userType = 'Role is required';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setNewAdminErrors(errors);
       return;
     }
-    
+
+    setAdminSubmitting(true);
+    setNewAdminErrors({});
+
+    const payload = {
+      email: emailValue.toLowerCase(),
+      password: passwordValue,
+      name: nameValue,
+      phone: (newAdminData.phone || '').trim(),
+      userType: userTypeValue
+    };
+
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/admin`, {
+      const response = await fetch(`${API_BASE_URL}/api/register-user`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          action: 'create-admin',
-          ...newAdminData
-        }),
+        body: JSON.stringify(payload)
       });
-      
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success) {
-          alert('Admin created successfully!');
-          setNewAdminData({
-            name: '',
-            email: '',
-            password: '',
-            phone: '',
-            userType: 'admin',
-            permissions: {
-              manage_slips: true,
-              manage_bookings: true,
-              view_analytics: true,
-              manage_users: false,
-              manage_admins: false,
-              system_settings: false
-            }
-          });
-          loadAllAdmins();
-        } else {
-          alert(result.error || 'Failed to create admin');
-        }
-      } else {
-        throw new Error('Failed to create admin');
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.details || result?.error || 'Failed to create admin');
       }
+
+      await loadAllAdmins();
+      await loadAllUsers();
+      resetNewAdminForm();
+      alert('✅ Admin created successfully!');
     } catch (error) {
       console.error('Error creating admin:', error);
-      alert('❌ Failed to create admin. Please try again.');
+      setNewAdminErrors((prev) => ({
+        ...prev,
+        general: error.message || 'Failed to create admin. Please try again.'
+      }));
+    } finally {
+      setAdminSubmitting(false);
     }
   };
+  const handleSaveAdmin = async () => {
+    if (!editingAdmin) {
+      return;
+    }
+
+    const errors = {};
+    const nameValue = (editingAdmin.name || '').trim();
+    const emailValue = (editingAdmin.email || '').trim();
+    const phoneValue = (editingAdmin.phone || '').trim();
+    const userTypeValue = normalizeUserType(editingAdmin.userType || editingAdmin.user_type || 'admin');
+
+    if (!nameValue) {
+      errors.name = 'Name is required';
+    }
+    if (!emailValue) {
+      errors.email = 'Email is required';
+    } else {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(emailValue)) {
+        errors.email = 'Please enter a valid email address';
+      }
+    }
+    if (!userTypeValue) {
+      errors.userType = 'Role is required';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setEditingAdminErrors(errors);
+      return;
+    }
+
+    setAdminSaving(true);
+    setEditingAdminErrors({});
+
+    const payload = {
+      name: nameValue,
+      email: emailValue.toLowerCase(),
+      phone: phoneValue || null,
+      userType: userTypeValue
+    };
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/admin/users/${editingAdmin.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.details || result?.error || 'Failed to update admin');
+      }
+
+      const updatedAdmin = result.user;
+      const updatedType = normalizeUserType(
+        updatedAdmin.user_type || updatedAdmin.userType || updatedAdmin.user_role
+      );
+
+      setAllAdmins((prev) => {
+        const updatedList = prev
+          .map((admin) => (admin.id === updatedAdmin.id ? updatedAdmin : admin))
+          .filter((admin) => {
+            const type = normalizeUserType(admin.user_type || admin.userType || admin.user_role);
+            return type === 'admin' || type === 'superadmin';
+          });
+        return sortAdmins(updatedList);
+      });
+
+      await loadAllUsers();
+      if (updatedType !== 'admin' && updatedType !== 'superadmin') {
+        await fetchHomeownerRecords();
+      }
+
+      handleCloseAdminModal();
+      alert('✅ Admin updated successfully!');
+    } catch (error) {
+      console.error('Error updating admin:', error);
+      setEditingAdminErrors((prev) => ({
+        ...prev,
+        general: error.message || 'Failed to update admin. Please try again.'
+      }));
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+  const handleDeleteAdmin = useCallback(
+    async (admin) => {
+      if (!admin?.id) {
+        alert('Unable to delete admin: missing identifier.');
+        return;
+      }
+
+      if (currentUser?.id && admin.id === currentUser.id) {
+        alert('You cannot remove your own admin account while logged in.');
+        return;
+      }
+
+      const confirmDelete = window.confirm(
+        `Remove admin "${admin.name || admin.email || admin.id}"?\n\nThis will revoke their admin access.`
+      );
+
+      if (!confirmDelete) {
+        return;
+      }
+
+      setAdminDeletingId(admin.id);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/admin/users/${admin.id}`, {
+          method: 'DELETE'
+        });
+
+        const result = await response.json().catch(() => null);
+
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.details || result?.error || 'Failed to remove admin');
+        }
+
+        setAllAdmins((prev) => prev.filter((existing) => existing.id !== admin.id));
+        await loadAllUsers();
+        await fetchHomeownerRecords();
+        alert('✅ Admin removed successfully!');
+      } catch (error) {
+        console.error('Error deleting admin:', error);
+        alert(error.message || '❌ Failed to remove admin. Please try again.');
+      } finally {
+        setAdminDeletingId(null);
+      }
+    },
+    [API_BASE_URL, currentUser?.id, fetchHomeownerRecords, loadAllUsers]
+  );
 
   const promotePropertyOwnerToAdmin = async (propertyOwner) => {
     if (!propertyOwner.email) {
@@ -6159,6 +6438,222 @@ const DockRentalPlatform = () => {
                   </p>
                 </div>
 
+                {superAdminMode && (
+                  <section className="mb-8" aria-labelledby="admin-management-heading">
+                    <h4
+                      id="admin-management-heading"
+                      className="text-lg font-semibold mb-2 flex items-center"
+                    >
+                      👑 Admins ({allAdmins.length})
+                      <span className="ml-2 text-sm text-purple-600 bg-purple-100 px-2 py-1 rounded-full">
+                        Superadmin Only
+                      </span>
+                    </h4>
+                    <p className="text-sm text-purple-700 mb-4">
+                      Create, update, or remove admin accounts. These controls are hidden from standard admins.
+                    </p>
+
+                    <details className="bg-white rounded-lg shadow mb-6 border border-purple-100">
+                      <summary className="px-6 py-4 cursor-pointer text-purple-800 font-semibold flex items-center justify-between">
+                        <span>Create New Admin</span>
+                        <span className="text-sm font-normal text-purple-600">(click to expand)</span>
+                      </summary>
+                      <div className="px-6 pb-6 pt-2 space-y-4">
+                        {newAdminErrors.general && (
+                          <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
+                            {newAdminErrors.general}
+                          </div>
+                        )}
+                        <form onSubmit={handleCreateAdmin} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                            <input
+                              type="text"
+                              value={newAdminData.name}
+                              onChange={(e) => handleNewAdminInput('name', e.target.value)}
+                              className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                                newAdminErrors.name ? 'border-red-500' : 'border-gray-300'
+                              }`}
+                              placeholder="Admin name"
+                            />
+                            {newAdminErrors.name && (
+                              <p className="text-xs text-red-600 mt-1">{newAdminErrors.name}</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input
+                              type="email"
+                              value={newAdminData.email}
+                              onChange={(e) => handleNewAdminInput('email', e.target.value)}
+                              className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                                newAdminErrors.email ? 'border-red-500' : 'border-gray-300'
+                              }`}
+                              placeholder="admin@example.com"
+                            />
+                            {newAdminErrors.email && (
+                              <p className="text-xs text-red-600 mt-1">{newAdminErrors.email}</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
+                            <input
+                              type="text"
+                              value={newAdminData.phone}
+                              onChange={(e) => handleNewAdminInput('phone', e.target.value)}
+                              className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                              placeholder="(555) 123-4567"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Temporary Password</label>
+                            <input
+                              type="text"
+                              value={newAdminData.password}
+                              onChange={(e) => handleNewAdminInput('password', e.target.value)}
+                              className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                                newAdminErrors.password ? 'border-red-500' : 'border-gray-300'
+                              }`}
+                              placeholder="Enter a temporary password"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">
+                              Share this password with the admin. They can change it after logging in.
+                            </p>
+                            {newAdminErrors.password && (
+                              <p className="text-xs text-red-600 mt-1">{newAdminErrors.password}</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                            <select
+                              value={newAdminData.userType}
+                              onChange={(e) => handleNewAdminInput('userType', e.target.value)}
+                              className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                                newAdminErrors.userType ? 'border-red-500' : 'border-gray-300'
+                              }`}
+                            >
+                              <option value="admin">Admin</option>
+                              <option value="superadmin">Superadmin</option>
+                            </select>
+                            {newAdminErrors.userType && (
+                              <p className="text-xs text-red-600 mt-1">{newAdminErrors.userType}</p>
+                            )}
+                          </div>
+
+                          <div className="md:col-span-2 flex items-center justify-end space-x-3 pt-2">
+                            <button
+                              type="button"
+                              onClick={resetNewAdminForm}
+                              className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                              disabled={adminSubmitting}
+                            >
+                              Clear
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={adminSubmitting}
+                              className={`px-4 py-2 text-sm font-medium rounded-md text-white ${
+                                adminSubmitting ? 'bg-purple-300 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'
+                              }`}
+                            >
+                              {adminSubmitting ? 'Creating...' : 'Create Admin'}
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </details>
+
+                    <div className="bg-white rounded-lg shadow overflow-hidden">
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-200">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Name
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Email
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Phone
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Role
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Actions
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="bg-white divide-y divide-gray-200">
+                            {allAdmins.length === 0 && (
+                              <tr>
+                                <td colSpan={5} className="px-6 py-4 text-sm text-gray-500 text-center">
+                                  No admins found. Use the form above to create one.
+                                </td>
+                              </tr>
+                            )}
+                            {allAdmins.map((admin) => {
+                              const normalizedRole = normalizeUserType(
+                                admin.user_type || admin.userType || admin.user_role
+                              );
+                              const isSuperadmin = normalizedRole === 'superadmin';
+
+                              return (
+                                <tr key={admin.id} className="hover:bg-gray-50">
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                    {admin.name || admin.email || 'Unnamed Admin'}
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    {admin.email || 'N/A'}
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    {admin.phone || 'N/A'}
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                    <span
+                                      className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                                        isSuperadmin
+                                          ? 'bg-purple-100 text-purple-800'
+                                          : 'bg-blue-100 text-blue-800'
+                                      }`}
+                                    >
+                                      {formatUserTypeLabel(normalizedRole)}
+                                    </span>
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 space-x-2">
+                                    <button
+                                      onClick={() => handleEditAdmin(admin)}
+                                      className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                                    >
+                                      ✏ Edit
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteAdmin(admin)}
+                                      disabled={adminDeletingId === admin.id}
+                                      className={`inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white ${
+                                        adminDeletingId === admin.id
+                                          ? 'bg-red-300 cursor-not-allowed'
+                                          : 'bg-red-600 hover:bg-red-700'
+                                      } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500`}
+                                    >
+                                      🗑 {adminDeletingId === admin.id ? 'Removing...' : 'Remove'}
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
                 {/* Property Owners Section */}
                 <div className="mb-8">
                   <h4 className="text-lg font-semibold mb-4 flex items-center">
@@ -6241,8 +6736,6 @@ const DockRentalPlatform = () => {
                           >
                             <option value="homeowner">Homeowner</option>
                             <option value="renter">Renter</option>
-                            <option value="admin">Admin</option>
-                            <option value="superadmin">Superadmin</option>
                           </select>
                           {newPropertyOwnerErrors.userType && (
                             <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.userType}</p>
@@ -7058,6 +7551,115 @@ const DockRentalPlatform = () => {
       )}
 
 
+
+      {showAdminEditModal && editingAdmin && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4 py-6 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-semibold text-gray-900">Edit Admin</h3>
+              <button onClick={handleCloseAdminModal} className="text-gray-400 hover:text-gray-600">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {editingAdminErrors.general && (
+              <div className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">
+                {editingAdminErrors.general}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                <input
+                  type="text"
+                  value={editingAdmin.name}
+                  onChange={(e) => updateEditingAdmin('name', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                    editingAdminErrors.name ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="Admin name"
+                  required
+                />
+                {editingAdminErrors.name && (
+                  <p className="text-xs text-red-600 mt-1">{editingAdminErrors.name}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={editingAdmin.email}
+                  onChange={(e) => updateEditingAdmin('email', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                    editingAdminErrors.email ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="admin@example.com"
+                  required
+                />
+                {editingAdminErrors.email && (
+                  <p className="text-xs text-red-600 mt-1">{editingAdminErrors.email}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
+                <input
+                  type="text"
+                  value={editingAdmin.phone || ''}
+                  onChange={(e) => updateEditingAdmin('phone', e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  placeholder="(555) 123-4567"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={editingAdmin.userType}
+                  onChange={(e) => updateEditingAdmin('userType', e.target.value)}
+                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
+                    editingAdminErrors.userType ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                >
+                  <option value="superadmin">Superadmin</option>
+                  <option value="admin">Admin</option>
+                  <option value="homeowner">Homeowner</option>
+                  <option value="renter">Renter</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Choose "Homeowner" or "Renter" to remove admin access.
+                </p>
+                {editingAdminErrors.userType && (
+                  <p className="text-xs text-red-600 mt-1">{editingAdminErrors.userType}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end space-x-3">
+              <button
+                type="button"
+                onClick={handleCloseAdminModal}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                disabled={adminSaving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAdmin}
+                disabled={adminSaving}
+                className={`px-4 py-2 text-sm font-medium rounded-md text-white ${
+                  adminSaving ? 'bg-purple-300 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'
+                }`}
+              >
+                {adminSaving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Property Owner Edit Modal */}
       {showPropertyOwnerEditModal && editingPropertyOwner && (
