@@ -328,9 +328,7 @@ app.post('/api/register-user', async (req, res) => {
         updateData.parcel_number = '';
       }
 
-      if (typeof emergencyContact === 'string' && emergencyContact.trim().length > 0) {
-        updateData.emergency_contact = emergencyContact.trim();
-      }
+      // Note: emergency_contact column removed - using phone instead
 
     if (normalizedUserType) {
       updateData.user_type = normalizedUserType;
@@ -483,7 +481,7 @@ app.post('/api/register-user', async (req, res) => {
               } catch (metadataErr) {
                 console.error('Error updating Auth metadata:', metadataErr);
               }
-            } else if (name || phone || propertyAddress || parcelNumber || emergencyContact) {
+            } else if (name || phone || propertyAddress || parcelNumber) {
               // Update profile details if provided, even if user type is the same
               const updateData = buildProfileUpdate(existingProfile);
 
@@ -513,8 +511,7 @@ app.post('/api/register-user', async (req, res) => {
                   : {},
               email_verified: false,
               property_address: propertyAddress || '',
-              parcel_number: parcelNumber || '',
-              emergency_contact: emergencyContact || ''
+              parcel_number: parcelNumber || ''
             };
               
               const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -550,8 +547,7 @@ app.post('/api/register-user', async (req, res) => {
                   : existingProfile?.permissions || {},
               email_verified: false,
               property_address: propertyAddress || '',
-              parcel_number: parcelNumber || '',
-              emergency_contact: emergencyContact || ''
+              parcel_number: parcelNumber || ''
             };
             
             const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -651,82 +647,304 @@ app.post('/api/register-user', async (req, res) => {
     
     // Create user profile in database using Admin client (bypasses RLS)
     try {
+      // First, check if user already exists in database
+      const { data: existingUserRaw } = await supabaseAdmin
+        .from('users')
+        .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+        .eq('email', email)
+        .maybeSingle();
+      
+      // Clean existingUser to remove any emergency_contact field if it exists
+      const existingUser = existingUserRaw ? (({ emergency_contact, ...rest }) => rest)(existingUserRaw) : null;
+      
       const profileData = {
+        id: userData.user.id, // Use Auth user ID for consistency
         name: name || email.split('@')[0],
         email: email,
         password_hash: 'auth_managed',
-        user_type: normalizedUserType,
+        user_type: normalizedUserType, // Explicitly set user_type
         phone: phone || '',
         permissions:
           normalizedUserType === 'homeowner'
             ? { homeowner_status: 'pending_verification' }
-            : {},
+            : (existingUser?.permissions || {}),
         email_verified: userData.user.email_confirmed_at !== null,
-        property_address: propertyAddress || '',
-        parcel_number: parcelNumber || '',
-        emergency_contact: emergencyContact || ''
+        property_address: propertyAddress || existingUser?.property_address || '',
+        parcel_number: parcelNumber || existingUser?.parcel_number || '',
+        updated_at: new Date().toISOString()
       };
       
-      const { data: profileResult, error: profileError } = await supabaseAdmin
+      // Ensure emergency_contact is never included (safety check)
+      if ('emergency_contact' in profileData) {
+        delete profileData.emergency_contact;
+      }
+      
+      console.log('📝 Creating/updating user profile:', { 
+        email, 
+        user_type: normalizedUserType, 
+        id: userData.user.id,
+        profileDataKeys: Object.keys(profileData)
+      });
+      console.log('📝 Profile data (excluding sensitive fields):', JSON.stringify({
+        ...profileData,
+        password_hash: '[REDACTED]'
+      }, null, 2));
+      
+      // Use upsert with email as conflict target (Supabase doesn't support multiple conflict columns)
+      let profileResult = null;
+      let profileError = null;
+      
+      const { data: upsertResult, error: upsertError } = await supabaseAdmin
         .from('users')
         .upsert(profileData, { onConflict: 'email' })
         .select()
         .single();
       
+      profileResult = upsertResult;
+      profileError = upsertError;
+      
       if (profileError) {
-        console.error('Error creating user profile:', profileError);
-        // Continue anyway - user exists in Auth
+        console.error('❌ Error upserting user profile:', profileError);
+        console.error('Profile data:', JSON.stringify(profileData, null, 2));
+        
+        // Try alternative: insert first, then update if it fails due to conflict
+        const { data: insertResult, error: insertError } = await supabaseAdmin
+          .from('users')
+          .insert(profileData)
+          .select()
+          .single();
+        
+        if (!insertError && insertResult) {
+          console.log('✅ User profile inserted:', insertResult);
+          profileResult = insertResult;
+          profileError = null;
+        } else if (insertError && insertError.code === '23505') {
+          // Unique violation - user exists, update it
+          console.log('📝 User exists, updating user_type...');
+          const { data: updatedProfile, error: updateError } = await supabaseAdmin
+            .from('users')
+            .update({
+              user_type: normalizedUserType,
+              name: profileData.name,
+              phone: profileData.phone,
+              email_verified: profileData.email_verified,
+              updated_at: profileData.updated_at
+            })
+            .eq('email', email)
+            .select()
+            .single();
+          
+          if (!updateError && updatedProfile) {
+            console.log('✅ User profile updated:', updatedProfile);
+            profileResult = updatedProfile;
+            profileError = null;
+          } else {
+            console.error('❌ Error updating user profile:', updateError);
+            profileError = updateError;
+          }
+        }
       } else {
-        console.log('✅ User profile created in database:', profileResult);
+        console.log('✅ User profile created/updated in database:', profileResult);
       }
+      
+      // Always fetch the user profile after creation/update to ensure it's correct
+      let finalUserProfile = profileResult;
+      if (!finalUserProfile || profileError) {
+        // Wait a moment for database to sync
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Try to fetch the user profile by ID (most reliable)
+        const { data: fetchedProfile, error: fetchError } = await supabaseAdmin
+          .from('users')
+          .select('*')
+          .eq('id', userData.user.id)
+          .maybeSingle();
+        
+        if (fetchedProfile && !fetchError) {
+          console.log('✅ Fetched user profile by ID after creation:', fetchedProfile);
+          finalUserProfile = fetchedProfile;
+        } else {
+          // Try by email as fallback
+          const { data: fetchedByEmail, error: fetchEmailError } = await supabaseAdmin
+            .from('users')
+            .select('*')
+            .eq('email', email)
+            .maybeSingle();
+          if (fetchedByEmail && !fetchEmailError) {
+            console.log('✅ Fetched user profile by email:', fetchedByEmail);
+            finalUserProfile = fetchedByEmail;
+          } else {
+            console.error('❌ Could not fetch user profile:', fetchError || fetchEmailError);
+          }
+        }
+      } else {
+        // Verify the user_type was set correctly
+        if (finalUserProfile.user_type !== normalizedUserType) {
+          console.log(`⚠️ User type mismatch: expected ${normalizedUserType}, got ${finalUserProfile.user_type}. Updating...`);
+          const { data: correctedProfile, error: correctError } = await supabaseAdmin
+            .from('users')
+            .update({ user_type: normalizedUserType, updated_at: new Date().toISOString() })
+            .eq('id', finalUserProfile.id)
+            .select()
+            .single();
+          
+          if (!correctError && correctedProfile) {
+            console.log('✅ User type corrected:', correctedProfile);
+            finalUserProfile = correctedProfile;
+          }
+        }
+      }
+      
+      // Generate verification link
+      const { data: tokenData, error: tokenError } = await supabaseAdmin.auth.admin.generateLink({
+        type: 'signup',
+        email: email,
+        options: {
+          redirectTo: `${req.headers.origin || 'http://localhost:3000'}/auth/callback`
+        }
+      });
+      
+      let verificationUrl = null;
+      if (!tokenError && tokenData) {
+        verificationUrl = tokenData.properties.action_link;
+      }
+      
+      // Send welcome email via Resend
+      let emailSent = false;
+      let emailErrorDetails = null;
+      try {
+        const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
+          name: name || email.split('@')[0],
+          userType: normalizedUserType || 'renter'
+        });
+        emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
+      } catch (emailErr) {
+        console.error('❌ Error sending welcome email:', emailErr);
+        emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+        // Continue anyway - user can verify later
+      }
+      
+      // Final verification: ensure user exists in database with correct user_type
+      if (!finalUserProfile || finalUserProfile.user_type !== normalizedUserType) {
+        console.log('⚠️ Final verification failed. Re-fetching user from database...');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const { data: verifiedProfile, error: verifyError } = await supabaseAdmin
+          .from('users')
+          .select('*')
+          .eq('email', email)
+          .maybeSingle();
+        
+        if (verifiedProfile) {
+          if (verifiedProfile.user_type !== normalizedUserType) {
+            console.log(`⚠️ User type still incorrect: ${verifiedProfile.user_type}. Force updating...`);
+            const { data: forceUpdated, error: forceError } = await supabaseAdmin
+              .from('users')
+              .update({ 
+                user_type: normalizedUserType,
+                name: name || verifiedProfile.name,
+                phone: phone || verifiedProfile.phone,
+                updated_at: new Date().toISOString()
+              })
+              .eq('email', email)
+              .select()
+              .single();
+            
+            if (!forceError && forceUpdated) {
+              console.log('✅ User type force updated:', forceUpdated);
+              finalUserProfile = forceUpdated;
+            } else {
+              console.error('❌ Failed to force update user type:', forceError);
+            }
+          } else {
+            finalUserProfile = verifiedProfile;
+          }
+        } else if (!verifiedProfile) {
+          // User doesn't exist in database - create it explicitly
+          console.log('⚠️ User not found in database. Creating explicitly...');
+          const { data: newProfile, error: createError } = await supabaseAdmin
+            .from('users')
+            .insert({
+              id: userData.user.id,
+              email: email,
+              name: name || email.split('@')[0],
+              phone: phone || '',
+              user_type: normalizedUserType,
+              password_hash: 'auth_managed',
+              email_verified: userData.user.email_confirmed_at !== null,
+              permissions: {},
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+          
+          if (!createError && newProfile) {
+            console.log('✅ User explicitly created in database:', newProfile);
+            finalUserProfile = newProfile;
+          } else {
+            console.error('❌ Failed to create user explicitly:', createError);
+          }
+        }
+      }
+      
+      // Log the final user profile for debugging
+      console.log('📊 Final user profile before response:', {
+        hasProfile: !!finalUserProfile,
+        user_type: finalUserProfile?.user_type,
+        expected_type: normalizedUserType,
+        email: finalUserProfile?.email || email,
+        id: finalUserProfile?.id || userData.user.id
+      });
+      
+      const responseUser = finalUserProfile 
+        ? mapAdminUserRecord(finalUserProfile)
+        : {
+            id: userData.user.id,
+            email: userData.user.email,
+            email_confirmed_at: userData.user.email_confirmed_at,
+            user_type: normalizedUserType,
+            name: name || email.split('@')[0],
+            phone: phone || '',
+            permissions: {}
+          };
+      
+      console.log('📤 Returning user in response:', {
+        id: responseUser.id,
+        email: responseUser.email,
+        user_type: responseUser.user_type,
+        isAdmin: ['admin', 'superadmin'].includes(responseUser.user_type)
+      });
+      
+      res.json({ 
+        success: true,
+        user: responseUser,
+        verificationUrl: verificationUrl,
+        message: emailSent 
+          ? 'User created successfully. Welcome email sent via Resend.'
+          : 'User created successfully. Welcome email could not be sent.',
+        emailSent: emailSent,
+        emailError: emailErrorDetails
+      });
     } catch (profileErr) {
       console.error('Error creating user profile:', profileErr);
       // Continue anyway - user exists in Auth
-    }
-    
-    // Generate verification link
-    const { data: tokenData, error: tokenError } = await supabaseAdmin.auth.admin.generateLink({
-      type: 'signup',
-      email: email,
-      options: {
-        redirectTo: `${req.headers.origin || 'http://localhost:3000'}/auth/callback`
-      }
-    });
-    
-    let verificationUrl = null;
-    if (!tokenError && tokenData) {
-      verificationUrl = tokenData.properties.action_link;
-    }
-    
-    // Send welcome email via Resend
-    let emailSent = false;
-    let emailErrorDetails = null;
-    try {
-      const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
-        name: name || email.split('@')[0],
-        userType: normalizedUserType || 'renter'
+      
+      // Still return success with minimal user data
+      res.json({ 
+        success: true,
+        user: {
+          id: userData.user.id,
+          email: userData.user.email,
+          email_confirmed_at: userData.user.email_confirmed_at,
+          user_type: normalizedUserType,
+          name: name || email.split('@')[0],
+          phone: phone || ''
+        },
+        message: 'User created in Auth. Profile creation had issues.',
+        emailSent: false
       });
-      emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
-    } catch (emailErr) {
-      console.error('❌ Error sending welcome email:', emailErr);
-      emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
-      // Continue anyway - user can verify later
     }
-    
-    res.json({ 
-      success: true,
-      user: {
-        id: userData.user.id,
-        email: userData.user.email,
-        email_confirmed_at: userData.user.email_confirmed_at
-      },
-      verificationUrl: verificationUrl,
-      message: emailSent 
-        ? 'User created successfully. Welcome email sent via Resend.'
-        : 'User created successfully. Welcome email could not be sent.',
-      emailSent: emailSent,
-      emailError: emailErrorDetails
-    });
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({ 
@@ -2405,7 +2623,7 @@ app.get('/api/homeowners/records', async (req, res) => {
 
     const { data: homeowners, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, emergency_contact, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
       .eq('user_type', 'homeowner')
       .order('property_address', { ascending: true });
 

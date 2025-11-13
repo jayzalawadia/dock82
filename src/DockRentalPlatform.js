@@ -1243,10 +1243,13 @@ const DockRentalPlatform = () => {
             if (userProfile) {
           setCurrentUser(userProfile);
           
-          // Set admin mode if superadmin
-          if (userProfile.user_type === 'superadmin') {
+          // Set admin mode if admin or superadmin
+          if (userProfile.user_type === 'admin' || userProfile.user_type === 'superadmin') {
             setAdminMode(true);
-            setSuperAdminMode(true);
+            // Set superadmin mode only for superadmin (for managing admins)
+            if (userProfile.user_type === 'superadmin') {
+              setSuperAdminMode(true);
+            }
           }
           
           // Load user's bookings - filter by user_id (with fallback to email for backward compatibility)
@@ -1309,10 +1312,13 @@ const DockRentalPlatform = () => {
           if (userProfile) {
           setCurrentUser(userProfile);
           
-          // Set admin mode if superadmin
-          if (userProfile.user_type === 'superadmin') {
+          // Set admin mode if admin or superadmin
+          if (userProfile.user_type === 'admin' || userProfile.user_type === 'superadmin') {
             setAdminMode(true);
-            setSuperAdminMode(true);
+            // Set superadmin mode only for superadmin (for managing admins)
+            if (userProfile.user_type === 'superadmin') {
+              setSuperAdminMode(true);
+            }
           }
           
           // Load user's bookings
@@ -3587,6 +3593,21 @@ const DockRentalPlatform = () => {
         throw new Error(result?.details || result?.error || 'Failed to create admin');
       }
 
+      // If we received a user object, add it optimistically
+      if (result?.user && result.user.user_type && ['admin', 'superadmin'].includes(normalizeUserType(result.user.user_type))) {
+        const newAdmin = {
+          ...result.user,
+          id: result.user.id || result.user.user?.id,
+          name: result.user.name || result.user.user?.name || newAdminData.name,
+          email: result.user.email || result.user.user?.email || newAdminData.email,
+          phone: result.user.phone || result.user.user?.phone || newAdminData.phone || '',
+          user_type: normalizeUserType(result.user.user_type || result.user.user?.user_type || newAdminData.userType)
+        };
+        setAllAdmins((prev) => sortAdmins([...prev, newAdmin]));
+      }
+
+      // Wait a moment for database to sync, then refresh admin list to ensure consistency
+      await new Promise(resolve => setTimeout(resolve, 800));
       await loadAllAdmins();
       await loadAllUsers();
       resetNewAdminForm();
@@ -6658,9 +6679,9 @@ const DockRentalPlatform = () => {
                 <div className="mb-8">
                   <h4 className="text-lg font-semibold mb-4 flex items-center">
                     🏠 Property Owners ({propertyOwners.length})
-                    {superAdminMode && (
+                    {adminMode && (
                       <span className="ml-2 text-sm text-blue-600 bg-blue-100 px-2 py-1 rounded-full">
-                        👑 Superadmin Access
+                        👑 Admin Access
                       </span>
                     )}
                   </h4>
@@ -6669,7 +6690,7 @@ const DockRentalPlatform = () => {
                     Pending verification owners ({pendingPropertyOwnersCount}) are highlighted at the top for review.
                   </div>
                 )}
-                  {superAdminMode && (
+                  {adminMode && (
                     <details className="bg-white rounded-lg shadow mb-6 border border-blue-100">
                       <summary className="px-6 py-4 cursor-pointer text-blue-800 font-semibold flex items-center justify-between">
                         <span>Add New Property Owner</span>
@@ -6873,7 +6894,7 @@ const DockRentalPlatform = () => {
                                 })()}
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                {superAdminMode ? (
+                                {adminMode ? (
                                   <div className="flex items-center gap-2 flex-wrap">
                                     <button
                                       onClick={() => handleEditPropertyOwner(owner)}
@@ -6882,14 +6903,14 @@ const DockRentalPlatform = () => {
                                     >
                                       ✏️ Edit
                                     </button>
-                                    {hasValidOwnerEmail(owner) && (
-                                  <button
-                                    onClick={() => promotePropertyOwnerToAdmin(owner)}
-                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                                    title="Promote to Admin (Superadmin Only)"
-                                  >
-                                    👑 Make Admin
-                                  </button>
+                                    {superAdminMode && hasValidOwnerEmail(owner) && (
+                                      <button
+                                        onClick={() => promotePropertyOwnerToAdmin(owner)}
+                                        className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                                        title="Promote to Admin (Superadmin Only)"
+                                      >
+                                        👑 Make Admin
+                                      </button>
                                     )}
                                     <button
                                       onClick={() => handleDeletePropertyOwner(owner)}
@@ -6905,7 +6926,7 @@ const DockRentalPlatform = () => {
                                     </button>
                                   </div>
                                 ) : hasValidOwnerEmail(owner) ? (
-                                  <span className="text-gray-400 text-xs">Contact superadmin</span>
+                                  <span className="text-gray-400 text-xs">Contact admin</span>
                                 ) : (
                                   <span className="text-gray-400 text-xs">No email</span>
                                 )}
