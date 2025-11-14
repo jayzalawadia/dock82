@@ -40,9 +40,14 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const resolveDefaultFromAddress = () => {
   const envFrom = process.env.EMAIL_FROM || process.env.RESEND_FROM;
   if (envFrom && !envFrom.toLowerCase().includes('resend.dev')) {
-    return envFrom;
+    // If env variable already has friendly name format, use it as-is
+    if (envFrom.includes('<')) {
+      return envFrom;
+    }
+    // Otherwise, add friendly name
+    return `Dock82 <${envFrom}>`;
   }
-  return 'noreply@dock82.com';
+  return 'Dock82 <noreply@dock82.com>';
 };
 const DEFAULT_EMAIL_FROM = resolveDefaultFromAddress();
 console.log('📧 Using email from address:', DEFAULT_EMAIL_FROM);
@@ -285,6 +290,7 @@ app.post('/api/register-user', async (req, res) => {
       userType,
       propertyAddress,
       parcelNumber,
+      lotNumber,
       emergencyContact
     } = req.body;
     
@@ -296,9 +302,9 @@ app.post('/api/register-user', async (req, res) => {
     const normalizedUserType = userType ? userType.toLowerCase() : 'renter';
     
     if (normalizedUserType === 'homeowner') {
-      if (!propertyAddress || !parcelNumber) {
+      if (!propertyAddress || !lotNumber) {
         return res.status(400).json({
-          error: 'Property address and parcel number are required for homeowner registration.'
+          error: 'Property address and Lot number are required for homeowner registration.'
         });
       }
     }
@@ -322,6 +328,15 @@ app.post('/api/register-user', async (req, res) => {
         updateData.property_address = '';
       }
 
+      // Handle lotNumber for homeowners (use lotNumber if provided, otherwise fallback to parcelNumber for backward compatibility)
+      const lotNumberToUse = lotNumber || parcelNumber;
+      if (typeof lotNumberToUse === 'string' && lotNumberToUse.trim().length > 0) {
+        updateData.lot_number = lotNumberToUse.trim();
+      } else if (!existingProfile.lot_number && normalizedUserType === 'homeowner') {
+        updateData.lot_number = '';
+      }
+      
+      // Keep parcelNumber for backward compatibility if provided
       if (typeof parcelNumber === 'string' && parcelNumber.trim().length > 0) {
         updateData.parcel_number = parcelNumber.trim();
       } else if (!existingProfile.parcel_number && normalizedUserType === 'homeowner') {
@@ -454,6 +469,7 @@ app.post('/api/register-user', async (req, res) => {
                         phone: phone || existingProfile.phone || authUser.user_metadata?.phone,
                         propertyAddress: propertyAddress || existingProfile.property_address || authUser.user_metadata?.propertyAddress || '',
                         parcelNumber: parcelNumber || existingProfile.parcel_number || authUser.user_metadata?.parcelNumber || '',
+                        lotNumber: lotNumber || parcelNumber || existingProfile.lot_number || authUser.user_metadata?.lotNumber || '',
                         homeownerStatus:
                           normalizedUserType === 'homeowner'
                             ? existingProfile.homeowner_status === 'verified'
@@ -511,7 +527,8 @@ app.post('/api/register-user', async (req, res) => {
                   : {},
               email_verified: false,
               property_address: propertyAddress || '',
-              parcel_number: parcelNumber || ''
+              parcel_number: parcelNumber || '',
+              lot_number: lotNumber || parcelNumber || ''
             };
               
               const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -547,7 +564,8 @@ app.post('/api/register-user', async (req, res) => {
                   : existingProfile?.permissions || {},
               email_verified: false,
               property_address: propertyAddress || '',
-              parcel_number: parcelNumber || ''
+              parcel_number: parcelNumber || '',
+              lot_number: lotNumber || parcelNumber || ''
             };
             
             const { data: newProfile, error: createProfileError } = await supabaseAdmin
@@ -671,6 +689,7 @@ app.post('/api/register-user', async (req, res) => {
         email_verified: userData.user.email_confirmed_at !== null,
         property_address: propertyAddress || existingUser?.property_address || '',
         parcel_number: parcelNumber || existingUser?.parcel_number || '',
+        lot_number: lotNumber || parcelNumber || existingUser?.lot_number || '',
         updated_at: new Date().toISOString()
       };
       
@@ -1438,6 +1457,60 @@ function generateBookingNotApprovedEmail(data) {
   `;
 }
 
+function generateHomeownerInactiveEmail(data) {
+  const homeownerName = data.name || 'Valued Homeowner';
+  const propertyAddress = data.propertyAddress || 'your property';
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #dc2626; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb; }
+        .footer { background: #e5e7eb; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; }
+        .highlight { background: #fee2e2; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #dc2626; }
+        .button { display: inline-block; padding: 12px 24px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>⚠️ Account Status Update - Dock82</h1>
+      </div>
+      <div class="content">
+        <p>Dear ${homeownerName},</p>
+        <p>This email is to inform you that your homeowner account status has been updated.</p>
+        
+        <div class="highlight">
+          <p><strong>Your account has been marked as "Inactive Owner".</strong></p>
+          <p>Property: ${propertyAddress}</p>
+        </div>
+        
+        <p><strong>What this means:</strong></p>
+        <ul>
+          <li>You will not be able to book dock slips at this time</li>
+          <li>Any existing bookings will remain valid unless specifically cancelled</li>
+          <li>You may need to contact Dock82 administration to reactivate your account</li>
+        </ul>
+        
+        <p><strong>Next steps:</strong></p>
+        <ul>
+          <li>If you believe this is an error, please contact Dock82 administration immediately</li>
+          <li>If you need to update your account information, please reach out to our support team</li>
+          <li>To reactivate your account, you may need to verify your property ownership</li>
+        </ul>
+        
+        <p>If you have any questions or concerns, please don't hesitate to contact our support team.</p>
+      </div>
+      <div class="footer">
+        <p>Best regards,<br>The Dock82 Team</p>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
 function generatePermitEmail(data) {
   const checkIn = data.checkIn ? new Date(data.checkIn).toLocaleDateString('en-US', { 
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
@@ -1562,6 +1635,10 @@ async function sendEmailNotificationInternal(type, email, data) {
     case 'welcome':
       emailSubject = `Welcome to Dock82!`;
       emailContent = generateWelcomeEmail(data);
+      break;
+    case 'homeownerInactive':
+      emailSubject = `Account Status Update - Dock82`;
+      emailContent = generateHomeownerInactiveEmail(data);
       break;
     default:
       throw new Error(`Invalid email type: ${type}`);
@@ -2943,14 +3020,31 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       }
     }
 
-    if (homeownerStatus !== undefined) {
+    // Simple logic: Track previous status from permissions column
+    const previousStatusFromPermissions = (existingUserRaw?.permissions?.homeowner_status || '').toString().trim();
+    const previousStatusLower = previousStatusFromPermissions.toLowerCase();
+    
+    console.log('🔍 BEFORE UPDATE - Permissions column status:', {
+      userId: id,
+      previousStatus: previousStatusFromPermissions,
+      previousStatusLower: previousStatusLower,
+      rawPermissions: existingUserRaw?.permissions,
+      email: existingUser.email,
+      emailRaw: existingUserRaw?.email,
+      userType: existingUser.user_type,
+      name: existingUser.name
+    });
+
+    if (homeownerStatus !== undefined && homeownerStatus !== null) {
       const sanitizedStatus = sanitizeNullableString(homeownerStatus);
+      
+      const verifiedAt =
+        sanitizedStatus && ['verified', 'active_owner', 'active'].includes(sanitizedStatus)
+          ? new Date().toISOString()
+          : null;
+      
       const isHomeowner = normalizeUserTypeValue(existingUser.user_type) === 'homeowner';
       if (isHomeowner) {
-        const verifiedAt =
-          sanitizedStatus && ['verified', 'active_owner', 'active'].includes(sanitizedStatus)
-            ? new Date().toISOString()
-            : null;
         permissionsWorking = applyHomeownerStatusToPermissions(
           permissionsWorking,
           sanitizedStatus || null,
@@ -2967,7 +3061,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       updatePayload.permissions = permissionsWorking;
     }
 
-    const { data: updatedUser, error: updateError } = await supabaseAdmin
+    const { data: updatedUserRaw, error: updateError } = await supabaseAdmin
       .from('users')
       .update(updatePayload)
       .eq('id', id)
@@ -2979,7 +3073,140 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       return res.status(500).json({ error: 'Failed to update user', details: updateError.message });
     }
 
-    res.json({ success: true, user: mapAdminUserRecord(updatedUser) });
+    // Read the permissions.homeowner_status AFTER the update
+    const updatedStatusFromPermissions = (updatedUserRaw?.permissions?.homeowner_status || '').toString().trim().toLowerCase();
+    const isHomeownerAfterUpdate = normalizeUserTypeValue(updatedUserRaw?.user_type) === 'homeowner';
+    
+    // Simple check: If permissions.homeowner_status changed from NOT "inactive_owner" to "inactive_owner"
+    const wasInactiveBefore = previousStatusLower === 'inactive_owner';
+    const isInactiveAfter = updatedStatusFromPermissions === 'inactive_owner';
+    const statusChangedToInactive = !wasInactiveBefore && isInactiveAfter && isHomeownerAfterUpdate;
+
+    console.log('🔍 AFTER UPDATE - Checking permissions column status change:', {
+      userId: id,
+      before: previousStatusLower,
+      after: updatedStatusFromPermissions,
+      wasInactiveBefore,
+      isInactiveAfter,
+      statusChangedToInactive,
+      isHomeowner: isHomeownerAfterUpdate,
+      email: updatedUserRaw?.email,
+      rawPermissionsBefore: existingUserRaw?.permissions,
+      rawPermissionsAfter: updatedUserRaw?.permissions
+    });
+
+    // Map the updated user (we need this in both branches)
+    const updatedUser = mapAdminUserRecord(updatedUserRaw);
+
+    if (statusChangedToInactive) {
+      console.log('✅ Status changed to inactive_owner! Sending notification and email:', {
+        userId: updatedUser.id,
+        email: updatedUser.email,
+        name: updatedUser.name
+      });
+
+      try {
+        // Try to get admin ID from request headers or use existing user ID as fallback
+        // For now, we'll use the existing user's ID as created_by (system admin)
+        const adminId = existingUser.id || updatedUser.id;
+        
+        // Create notification (always send notification, even if no email)
+        const notificationTitle = 'Account Status Update';
+        const notificationMessage = `Your homeowner account has been marked as inactive. You will not be able to book dock slips until your account is reactivated. Please contact Dock82 administration if you have any questions.`;
+        
+        console.log('📬 Creating notification for inactive homeowner:', {
+          recipient_user_id: updatedUser.id,
+          title: notificationTitle,
+          created_by: adminId
+        });
+        
+        const { data: notificationData, error: notificationError } = await supabaseAdmin
+          .from('notifications')
+          .insert({
+            recipient_user_id: updatedUser.id,
+            title: notificationTitle,
+            message: notificationMessage,
+            created_by: adminId
+          })
+          .select()
+          .single();
+        
+        if (notificationError) {
+          console.error('❌ Error creating notification for inactive homeowner:', notificationError);
+          console.error('Notification error details:', JSON.stringify(notificationError, null, 2));
+        } else {
+          console.log('✅ Notification created for inactive homeowner:', notificationData.id);
+        }
+        
+        // Send email only if user has an email address
+        const homeownerEmail = updatedUser.email?.trim() || updatedUserRaw?.email?.trim();
+        console.log('📧 Email sending check:', {
+          updatedUserEmail: updatedUser.email,
+          updatedUserRawEmail: updatedUserRaw?.email,
+          homeownerEmail: homeownerEmail,
+          hasEmail: !!homeownerEmail,
+          emailLength: homeownerEmail?.length
+        });
+        
+        if (homeownerEmail && homeownerEmail.length > 0) {
+          try {
+            console.log('📧 Attempting to send email to inactive homeowner:', {
+              email: homeownerEmail,
+              name: updatedUser.name,
+              propertyAddress: updatedUser.property_address
+            });
+            
+            const emailResult = await sendEmailNotificationInternal('homeownerInactive', homeownerEmail, {
+              name: updatedUser.name || homeownerEmail.split('@')[0],
+              propertyAddress: updatedUser.property_address || 'your property'
+            });
+            
+            console.log('📧 Email sending result:', {
+              success: emailResult?.success,
+              emailId: emailResult?.emailId,
+              logged: emailResult?.logged,
+              emailSubject: emailResult?.emailSubject
+            });
+            
+            if (emailResult?.success && !emailResult?.logged) {
+              console.log('✅ Email sent successfully to inactive homeowner:', homeownerEmail);
+            } else if (emailResult?.logged) {
+              console.log('⚠️  Email was logged but not sent (RESEND_API_KEY not configured):', homeownerEmail);
+            } else {
+              console.warn('⚠️  Email sending returned unexpected result:', emailResult);
+            }
+          } catch (emailError) {
+            console.error('❌ Error sending email to inactive homeowner:', emailError);
+            console.error('Email error message:', emailError?.message);
+            console.error('Email error details:', emailError?.details);
+            console.error('Email error stack:', emailError?.stack);
+            // Don't fail the request if email fails
+          }
+        } else {
+          console.log('⚠️  Homeowner does not have a valid email address. Skipping email notification.');
+          console.log('Email check details:', {
+            updatedUserEmail: updatedUser.email,
+            updatedUserRawEmail: updatedUserRaw?.email,
+            homeownerEmail: homeownerEmail
+          });
+        }
+      } catch (notifyError) {
+        console.error('❌ Error sending notification/email to inactive homeowner:', notifyError);
+        console.error('Notify error details:', JSON.stringify(notifyError, null, 2));
+        // Don't fail the request if notification/email fails
+      }
+    } else {
+      console.log('⚠️  Notification/email not sent. Status did not change to inactive_owner:', {
+        before: previousStatusLower,
+        after: updatedStatusFromPermissions,
+        wasInactiveBefore,
+        isInactiveAfter,
+        isHomeowner: isHomeownerAfterUpdate
+      });
+    }
+
+    // Return the updated user
+    res.json({ success: true, user: updatedUser });
   } catch (error) {
     console.error('Error updating user:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });

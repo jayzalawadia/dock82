@@ -135,6 +135,7 @@ const DockRentalPlatform = () => {
     userType: 'renter',
     propertyAddress: '',
     parcelNumber: '',
+    lotNumber: '',
     emergencyContact: ''
   });
   const [userBookings, setUserBookings] = useState([]);
@@ -2996,13 +2997,13 @@ const DockRentalPlatform = () => {
       console.log('AUTH DEBUG - Attempting Supabase Auth signup');
       
       if (registerData.userType === 'homeowner') {
-        if (!registerData.propertyAddress || !registerData.parcelNumber) {
-          alert('Homeowners must select their property address and enter the parcel number before continuing.');
+        if (!registerData.propertyAddress || !registerData.lotNumber) {
+          alert('Homeowners must select their property address and enter the Lot number before continuing.');
           return;
         }
 
         const normalizedAddress = registerData.propertyAddress.trim().toLowerCase();
-        const normalizedParcel = registerData.parcelNumber.trim();
+        const normalizedLot = registerData.lotNumber.trim();
 
         if (propertyOwners.length) {
           const matchingOwner = propertyOwners.find(
@@ -3014,9 +3015,9 @@ const DockRentalPlatform = () => {
             return;
           }
 
-          const recordedParcel = (matchingOwner.parcel_number || '').trim();
-          if (recordedParcel && recordedParcel !== normalizedParcel) {
-            alert('❌ The parcel number does not match our records.\n\nPlease double-check the parcel number or contact Dock82 support at support@dock82.com if you need help.');
+          const recordedLot = (matchingOwner.lot_number || '').trim();
+          if (recordedLot && recordedLot !== normalizedLot) {
+            alert('❌ The Lot number does not match our records.\n\nPlease double-check the Lot number or contact Dock82 support at support@dock82.com if you need help.');
             return;
           }
 
@@ -3071,7 +3072,7 @@ const DockRentalPlatform = () => {
       
       const localApiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
       const propertyAddressPayload = registerData.propertyAddress ? registerData.propertyAddress.trim() : '';
-      const parcelNumberPayload = registerData.parcelNumber ? registerData.parcelNumber.trim() : '';
+      const lotNumberPayload = registerData.lotNumber ? registerData.lotNumber.trim() : '';
       
       // Check if server is running and has the endpoint
       let registerResponse;
@@ -3088,7 +3089,7 @@ const DockRentalPlatform = () => {
             phone: registerData.phone,
             userType: registerData.userType ? registerData.userType.toLowerCase() : 'renter',
             propertyAddress: propertyAddressPayload,
-            parcelNumber: parcelNumberPayload,
+            lotNumber: lotNumberPayload,
             emergencyContact: registerData.emergencyContact
           })
         });
@@ -3143,7 +3144,7 @@ const DockRentalPlatform = () => {
           // Close registration modal and show login form
           setShowLoginModal(true);
           setAuthStep('login');
-          setRegisterData({ email: '', password: '', name: '', phone: '', userType: 'renter', propertyAddress: '', parcelNumber: '', emergencyContact: '', confirmPassword: '' });
+          setRegisterData({ email: '', password: '', name: '', phone: '', userType: 'renter', propertyAddress: '', parcelNumber: '', lotNumber: '', emergencyContact: '', confirmPassword: '' });
           return;
         }
         
@@ -3346,6 +3347,7 @@ const DockRentalPlatform = () => {
           userType: 'renter',
           propertyAddress: '',
           parcelNumber: '',
+          lotNumber: '',
           emergencyContact: ''
         });
         setAuthStep('login');
@@ -3381,6 +3383,7 @@ const DockRentalPlatform = () => {
           userType: 'renter',
           propertyAddress: '',
           parcelNumber: '',
+          lotNumber: '',
           emergencyContact: ''
         });
         setAuthStep('login');
@@ -7414,7 +7417,7 @@ const DockRentalPlatform = () => {
                   <p className="text-gray-600">Please verify your contact details before creating your account</p>
                   {registerData.userType === 'homeowner' && (
                     <p className="text-xs text-blue-600 mt-2">
-                      Need help finding your parcel number or registered email? Reach out to Dock82 support at <a href="mailto:support@dock82.com" className="underline">support@dock82.com</a>.
+                      Need help finding your Lot number or registered email? Reach out to Dock82 support at <a href="mailto:support@dock82.com" className="underline">support@dock82.com</a>.
                     </p>
                   )}
                 </div>
@@ -7446,9 +7449,9 @@ const DockRentalPlatform = () => {
                         </span>
                       </div>
                       <div className="flex justify-between items-center">
-                        <span className="text-sm font-medium text-gray-700">Parcel Number:</span>
+                        <span className="text-sm font-medium text-gray-700">Lot Number:</span>
                         <span className="text-sm text-gray-900">
-                          {registerData.parcelNumber || 'Not provided'}
+                          {registerData.lotNumber || 'Not provided'}
                         </span>
                       </div>
                     </>
@@ -7491,17 +7494,17 @@ const DockRentalPlatform = () => {
                       )}
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Parcel Number</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Lot Number</label>
                       <input
                         type="text"
-                        value={registerData.parcelNumber || ''}
-                        onChange={(e) => setRegisterData({...registerData, parcelNumber: e.target.value})}
+                        value={registerData.lotNumber || ''}
+                        onChange={(e) => setRegisterData({...registerData, lotNumber: e.target.value})}
                         className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="Enter the parcel number associated with your property"
+                        placeholder="Enter the Lot number associated with your property"
                         required
                       />
                         <p className="text-xs text-gray-500 mt-1">
-                          This must match the parcel number on record for your property. If you are unsure, contact Dock82 support.
+                          This must match the Lot number on record for your property. If you are unsure, contact Dock82 support.
                         </p>
                     </div>
                     <div>

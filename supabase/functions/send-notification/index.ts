@@ -13,8 +13,8 @@ const RESEND_API_KEY = edgeEnv?.get('RESEND_API_KEY');
 const EMAIL_FROM_ENV = edgeEnv?.get('EMAIL_FROM') ?? edgeEnv?.get('RESEND_FROM');
 const DEFAULT_EMAIL_FROM =
   EMAIL_FROM_ENV && !EMAIL_FROM_ENV.toLowerCase().includes('resend.dev')
-    ? EMAIL_FROM_ENV
-    : 'noreply@dock82.com';
+    ? (EMAIL_FROM_ENV.includes('<') ? EMAIL_FROM_ENV : `Dock82 <${EMAIL_FROM_ENV}>`)
+    : 'Dock82 <noreply@dock82.com>';
 
 interface EmailData {
   guestName: string;
