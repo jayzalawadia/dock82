@@ -31,10 +31,19 @@ const supabaseAdmin = supabaseServiceKey
   : null;
 
 // Debug: Check if environment variables are loaded
+console.log('========================================');
+console.log('🚀 Backend Server Starting...');
+console.log('🌐 Environment:', process.env.NODE_ENV || 'development');
+console.log('========================================');
 console.log('🔑 Resend API Key present:', process.env.RESEND_API_KEY ? 'Yes ✅' : 'No ❌');
 console.log('🔑 Resend API Key (first 10 chars):', process.env.RESEND_API_KEY ? process.env.RESEND_API_KEY.substring(0, 10) + '...' : 'Missing');
 console.log('🔑 SUPABASE_SERVICE_ROLE_KEY present:', supabaseServiceKey ? 'Yes ✅' : 'No ❌');
 console.log('🔑 SUPABASE_URL:', supabaseUrl);
+if (!process.env.RESEND_API_KEY) {
+  console.error('⚠️  WARNING: RESEND_API_KEY is not set! Emails will not work.');
+  console.error('⚠️  To fix: Set RESEND_API_KEY in Elastic Beanstalk environment variables');
+}
+console.log('========================================');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const resolveDefaultFromAddress = () => {
@@ -1645,8 +1654,13 @@ async function sendEmailNotificationInternal(type, email, data) {
   }
 
   console.log('📧 Preparing email (internal):', { type, email, emailSubject });
+  console.log('🔑 RESEND_API_KEY present:', process.env.RESEND_API_KEY ? 'Yes ✅' : 'No ❌');
+  console.log('📧 DEFAULT_EMAIL_FROM:', DEFAULT_EMAIL_FROM);
+  console.log('🌐 Environment:', process.env.NODE_ENV || 'development');
 
   if (!process.env.RESEND_API_KEY || process.env.RESEND_API_KEY === 'your_resend_api_key_here') {
+    console.error('❌ RESEND_API_KEY is missing or not configured in production!');
+    console.error('❌ Set RESEND_API_KEY in Elastic Beanstalk environment variables');
     console.log('⚠️  Resend API key not configured. Email logged to console instead.');
     console.log('📧 Email Subject:', emailSubject);
     console.log('📧 Email To:', email);
@@ -1662,13 +1676,18 @@ async function sendEmailNotificationInternal(type, email, data) {
   });
 
   if (emailError) {
-    console.error('❌ Resend error:', emailError);
+    console.error('❌ Resend API error:', emailError);
+    console.error('❌ Error details:', JSON.stringify(emailError, null, 2));
+    console.error('❌ Email FROM address:', DEFAULT_EMAIL_FROM);
+    console.error('❌ Email TO address:', email);
     const error = new Error('Failed to send email');
     error.details = emailError;
     throw error;
   }
 
-  console.log('✅ Email sent via Resend:', emailData?.id);
+  console.log('✅ Email sent successfully via Resend:', emailData?.id);
+  console.log('📧 Email FROM:', DEFAULT_EMAIL_FROM);
+  console.log('📧 Email TO:', email);
   return { success: true, emailId: emailData?.id };
 }
 
