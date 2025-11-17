@@ -14,7 +14,14 @@ if (fs.existsSync(envLocalPath)) {
 }
 
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Initialize Stripe with error handling
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+if (!stripeSecretKey) {
+  console.error('❌ ERROR: STRIPE_SECRET_KEY is not set in environment variables!');
+  console.error('Please set STRIPE_SECRET_KEY in your .env.local file');
+}
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
 
 // Initialize Supabase Admin client for generating verification tokens
 const supabaseUrl = process.env.SUPABASE_URL || 'https://phstdzlniugqbxtfgktb.supabase.co';
@@ -233,16 +240,26 @@ const mapAdminUserRecord = (user) => {
     ...user,
     permissions,
     homeowner_status: finalStatus,
-    homeowner_verified_at: homeownerVerifiedAt
+    homeowner_verified_at: homeownerVerifiedAt,
+    dues: user.dues || null
   };
 };
 
 // Create payment intent endpoint
 app.post('/api/create-payment-intent', async (req, res) => {
   try {
+    if (!stripe) {
+      console.error('❌ Stripe not initialized - STRIPE_SECRET_KEY missing');
+      return res.status(500).json({ 
+        error: 'Payment processing not configured',
+        details: 'STRIPE_SECRET_KEY is not set in environment variables'
+      });
+    }
+
     const { amount, currency = 'usd', booking } = req.body;
     
     console.log('Creating payment intent for amount:', amount);
+    console.log('Stripe key prefix:', process.env.STRIPE_SECRET_KEY ? process.env.STRIPE_SECRET_KEY.substring(0, 7) : 'NOT SET');
     
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
@@ -285,6 +302,246 @@ app.post('/api/create-payment-intent', async (req, res) => {
       error: 'Failed to create payment intent',
       details: error.message 
     });
+  }
+});
+
+// Pay dues endpoint
+app.post('/api/pay-dues', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { userId, amount, paymentIntentId } = req.body;
+
+    if (!userId || !amount || !paymentIntentId) {
+      return res.status(400).json({ error: 'User ID, amount, and payment intent ID are required' });
+    }
+
+    // Verify payment intent with Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    
+    // Accept multiple successful statuses (succeeded, requires_capture, processing)
+    const successfulStatuses = ['succeeded', 'requires_capture', 'processing'];
+    if (!successfulStatuses.includes(paymentIntent.status)) {
+      console.error('Payment intent status check failed:', {
+        paymentIntentId,
+        status: paymentIntent.status,
+        amount: paymentIntent.amount,
+        currency: paymentIntent.currency
+      });
+      return res.status(400).json({ 
+        error: 'Payment not completed', 
+        details: `Payment status is ${paymentIntent.status}. Expected one of: ${successfulStatuses.join(', ')}` 
+      });
+    }
+
+    // Get current user
+    const { data: existingUserRaw, error: fetchError } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, user_type, permissions, dues')
+      .eq('id', userId)
+      .single();
+
+    if (fetchError || !existingUserRaw) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const existingUser = mapAdminUserRecord(existingUserRaw);
+    const isHomeowner = normalizeUserTypeValue(existingUser.user_type) === 'homeowner';
+
+    if (!isHomeowner) {
+      return res.status(400).json({ error: 'User is not a homeowner' });
+    }
+
+    // Update user: remove dues and reactivate
+    const permissionsWorking = parsePermissions(existingUserRaw.permissions);
+    permissionsWorking.homeowner_status = 'verified';
+    permissionsWorking.homeowner_verified_at = new Date().toISOString();
+
+    const { data: updatedUserRaw, error: updateError } = await supabaseAdmin
+      .from('users')
+      .update({
+        permissions: permissionsWorking,
+        dues: null, // Clear dues after payment
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', userId)
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, dues, email_verified, created_at, updated_at')
+      .single();
+
+    if (updateError) {
+      console.error('Error updating user after dues payment:', updateError);
+      return res.status(500).json({ error: 'Failed to reactivate account', details: updateError.message });
+    }
+
+    const updatedUser = mapAdminUserRecord(updatedUserRaw);
+
+    console.log('✅ Dues payment processed and account reactivated:', {
+      userId,
+      amount,
+      paymentIntentId,
+      newStatus: 'verified'
+    });
+
+    // Send notifications to homeowner and all admins/superadmins
+    try {
+      // 1. Notify the homeowner
+      const homeownerNotificationTitle = 'Payment Successful - Account Reactivated';
+      const homeownerNotificationMessage = `Your dues payment of $${parseFloat(amount).toFixed(2)} has been processed successfully. Refresh the page to book the slips again.`;
+      
+      console.log('📬 Creating notification for homeowner (dues payment):', {
+        recipient_user_id: updatedUser.id,
+        userIdType: typeof updatedUser.id,
+        userIdValue: updatedUser.id,
+        title: homeownerNotificationTitle
+      });
+      
+      // Ensure user ID is in correct format (UUID string)
+      const recipientUserId = String(updatedUser.id);
+      const createdByUserId = String(updatedUser.id);
+      
+      const { data: homeownerNotification, error: homeownerNotificationError } = await supabaseAdmin
+        .from('notifications')
+        .insert({
+          recipient_user_id: recipientUserId,
+          title: homeownerNotificationTitle,
+          message: homeownerNotificationMessage,
+          created_by: createdByUserId // System-generated notification
+        })
+        .select()
+        .single();
+      
+      if (homeownerNotificationError) {
+        console.error('❌ Error creating notification for homeowner:', homeownerNotificationError);
+        console.error('❌ Error details:', JSON.stringify(homeownerNotificationError, null, 2));
+        console.error('❌ User ID used:', recipientUserId);
+        console.error('❌ User ID type:', typeof recipientUserId);
+      } else {
+        console.log('✅ Notification created for homeowner:', homeownerNotification?.id);
+        console.log('✅ Notification details:', JSON.stringify(homeownerNotification, null, 2));
+      }
+
+      // 2. Send email to homeowner
+      const homeownerEmail = updatedUser.email?.trim() || updatedUserRaw?.email?.trim();
+      console.log('📧 Email sending check for homeowner:', {
+        updatedUserEmail: updatedUser.email,
+        updatedUserRawEmail: updatedUserRaw?.email,
+        homeownerEmail: homeownerEmail,
+        hasEmail: !!homeownerEmail,
+        emailLength: homeownerEmail?.length
+      });
+      
+      if (homeownerEmail && homeownerEmail.length > 0) {
+        try {
+          console.log('📧 Attempting to send email to homeowner for dues payment:', {
+            email: homeownerEmail,
+            name: updatedUser.name,
+            amount: parseFloat(amount).toFixed(2)
+          });
+          
+          const emailResult = await sendEmailNotificationInternal('duesPaymentSuccess', homeownerEmail, {
+            name: updatedUser.name || homeownerEmail.split('@')[0],
+            amount: parseFloat(amount).toFixed(2),
+            propertyAddress: updatedUser.property_address || 'your property'
+          });
+          
+          console.log('📧 Email sending result:', {
+            success: emailResult?.success,
+            logged: emailResult?.logged,
+            emailId: emailResult?.emailId,
+            emailSubject: emailResult?.emailSubject
+          });
+          
+          if (emailResult?.success && !emailResult?.logged) {
+            console.log('✅ Email sent to homeowner for dues payment:', homeownerEmail);
+          } else if (emailResult?.logged) {
+            console.log('⚠️  Email was logged but not sent (RESEND_API_KEY not configured):', homeownerEmail);
+          } else {
+            console.warn('⚠️  Email sending returned unexpected result:', emailResult);
+          }
+        } catch (emailError) {
+          console.error('❌ Error sending email to homeowner:', emailError);
+          console.error('❌ Email error message:', emailError?.message);
+          console.error('❌ Email error stack:', emailError?.stack);
+        }
+      } else {
+        console.log('⚠️  Homeowner does not have a valid email address. Skipping email notification.');
+      }
+
+      // 3. Notify all admins and superadmins
+      const { data: admins, error: adminsError } = await supabaseAdmin
+        .from('users')
+        .select('id, name, email')
+        .in('user_type', ['admin', 'superadmin']);
+      
+      if (!adminsError && admins && admins.length > 0) {
+        const adminNotificationTitle = 'Homeowner Dues Payment Completed';
+        const adminNotificationMessage = `${updatedUser.name || updatedUser.email} has successfully paid their outstanding dues of $${parseFloat(amount).toFixed(2)}. Their account has been reactivated and is now verified.`;
+        
+        console.log(`📬 Creating notifications for ${admins.length} admin(s)/superadmin(s):`, {
+          homeownerName: updatedUser.name,
+          homeownerEmail: updatedUser.email,
+          amount: parseFloat(amount).toFixed(2)
+        });
+        
+        // Create notifications for all admins
+        const adminNotifications = admins.map(admin => ({
+          recipient_user_id: admin.id,
+          title: adminNotificationTitle,
+          message: adminNotificationMessage,
+          created_by: updatedUser.id // System-generated notification
+        }));
+        
+        const { data: insertedAdminNotifications, error: adminNotificationsError } = await supabaseAdmin
+          .from('notifications')
+          .insert(adminNotifications)
+          .select();
+        
+        if (adminNotificationsError) {
+          console.error('❌ Error creating notifications for admins:', adminNotificationsError);
+        } else {
+          console.log(`✅ Notifications created for ${insertedAdminNotifications?.length || 0} admin(s)/superadmin(s)`);
+        }
+
+        // 4. Send emails to admins (optional - can be commented out if too many emails)
+        for (const admin of admins) {
+          if (admin.email && admin.email.trim()) {
+            try {
+              const adminEmailResult = await sendEmailNotificationInternal('adminDuesPaymentNotification', admin.email, {
+                adminName: admin.name || admin.email.split('@')[0],
+                homeownerName: updatedUser.name || updatedUser.email,
+                homeownerEmail: updatedUser.email,
+                amount: parseFloat(amount).toFixed(2),
+                propertyAddress: updatedUser.property_address || 'N/A'
+              });
+              
+              if (adminEmailResult?.success && !adminEmailResult?.logged) {
+                console.log(`✅ Email sent to admin ${admin.email} for dues payment`);
+              }
+            } catch (adminEmailError) {
+              console.error(`❌ Error sending email to admin ${admin.email}:`, adminEmailError);
+            }
+          }
+        }
+      } else if (adminsError) {
+        console.error('❌ Error fetching admins for notifications:', adminsError);
+      } else {
+        console.log('⚠️  No admins/superadmins found to notify');
+      }
+    } catch (notifyError) {
+      console.error('❌ Error sending notifications/emails for dues payment:', notifyError);
+      // Don't fail the request if notifications fail
+    }
+
+    res.json({ 
+      success: true, 
+      user: updatedUser,
+      message: 'Dues payment processed successfully. Account reactivated.'
+    });
+  } catch (error) {
+    console.error('Error processing dues payment:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
@@ -1608,6 +1865,111 @@ function generatePermitEmail(data) {
   `;
 }
 
+function generateDuesPaymentSuccessEmail(data) {
+  const homeownerName = data.name || 'Valued Homeowner';
+  const amount = data.amount || '0.00';
+  const propertyAddress = data.propertyAddress || 'your property';
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #059669; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb; }
+        .footer { background: #e5e7eb; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; }
+        .highlight { background: #d1fae5; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #059669; }
+        .amount { font-size: 24px; font-weight: bold; color: #059669; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>✅ Payment Successful - Account Reactivated</h1>
+      </div>
+      <div class="content">
+        <p>Dear ${homeownerName},</p>
+        <p>Great news! Your dues payment has been processed successfully.</p>
+        
+        <div class="highlight">
+          <p><strong>Payment Amount:</strong> <span class="amount">$${amount}</span></p>
+          <p><strong>Property:</strong> ${propertyAddress}</p>
+          <p><strong>Status:</strong> Account Reactivated ✅</p>
+        </div>
+        
+        <p><strong>What happens next:</strong></p>
+        <ul>
+          <li>Your homeowner account has been reactivated</li>
+          <li>You can now book dock slips again</li>
+          <li>All account privileges have been restored</li>
+        </ul>
+        
+        <p>Thank you for your payment. We appreciate your prompt attention to this matter.</p>
+        
+        <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
+      </div>
+      <div class="footer">
+        <p>Best regards,<br>The Dock82 Team</p>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+function generateAdminDuesPaymentEmail(data) {
+  const adminName = data.adminName || 'Admin';
+  const homeownerName = data.homeownerName || 'Homeowner';
+  const homeownerEmail = data.homeownerEmail || 'N/A';
+  const amount = data.amount || '0.00';
+  const propertyAddress = data.propertyAddress || 'N/A';
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #2563eb; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb; }
+        .footer { background: #e5e7eb; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; }
+        .info-box { background: #dbeafe; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #2563eb; }
+        .amount { font-size: 20px; font-weight: bold; color: #059669; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>💰 Homeowner Dues Payment Completed</h1>
+      </div>
+      <div class="content">
+        <p>Dear ${adminName},</p>
+        <p>A homeowner has successfully paid their outstanding dues.</p>
+        
+        <div class="info-box">
+          <p><strong>Homeowner:</strong> ${homeownerName}</p>
+          <p><strong>Email:</strong> ${homeownerEmail}</p>
+          <p><strong>Property Address:</strong> ${propertyAddress}</p>
+          <p><strong>Payment Amount:</strong> <span class="amount">$${amount}</span></p>
+          <p><strong>Account Status:</strong> Verified ✅</p>
+        </div>
+        
+        <p><strong>Action taken:</strong></p>
+        <ul>
+          <li>Dues payment processed successfully</li>
+          <li>Homeowner account reactivated</li>
+          <li>Account status updated to "verified"</li>
+          <li>Homeowner can now book dock slips again</li>
+        </ul>
+        
+        <p>This is an automated notification. No action is required from you at this time.</p>
+      </div>
+      <div class="footer">
+        <p>Best regards,<br>The Dock82 System</p>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
 async function sendEmailNotificationInternal(type, email, data) {
   if (!type || !email || !data) {
     throw new Error('Missing email notification parameters');
@@ -1648,6 +2010,14 @@ async function sendEmailNotificationInternal(type, email, data) {
     case 'homeownerInactive':
       emailSubject = `Account Status Update - Dock82`;
       emailContent = generateHomeownerInactiveEmail(data);
+      break;
+    case 'duesPaymentSuccess':
+      emailSubject = `Payment Successful - Account Reactivated - Dock82`;
+      emailContent = generateDuesPaymentSuccessEmail(data);
+      break;
+    case 'adminDuesPaymentNotification':
+      emailSubject = `Homeowner Dues Payment Completed - Dock82`;
+      emailContent = generateAdminDuesPaymentEmail(data);
       break;
     default:
       throw new Error(`Invalid email type: ${type}`);
@@ -2719,7 +3089,7 @@ app.get('/api/homeowners/records', async (req, res) => {
 
     const { data: homeowners, error } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, dues, email_verified, created_at, updated_at')
       .eq('user_type', 'homeowner')
       .order('property_address', { ascending: true });
 
@@ -2848,7 +3218,7 @@ app.get('/api/admin/users', async (req, res) => {
     const { data: users, error } = await supabaseAdmin
       .from('users')
       .select(
-        'id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, updated_at, created_at'
+        'id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, dues, email_verified, updated_at, created_at'
       )
       .order('name');
 
@@ -2969,12 +3339,13 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       propertyAddress,
       parcelNumber,
       lotNumber,
-      homeownerStatus
+      homeownerStatus,
+      dues
     } = req.body || {};
 
     const { data: existingUserRaw, error: fetchError } = await supabaseAdmin
       .from('users')
-      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, phone, user_type, property_address, parcel_number, lot_number, permissions, dues, email_verified, created_at, updated_at')
       .eq('id', id)
       .single();
 
@@ -3076,6 +3447,35 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       }
     }
 
+    // Handle dues - store in dedicated dues column
+    if (dues !== undefined) {
+      console.log('🔍 Processing dues update:', {
+        userId: id,
+        dues: dues,
+        duesType: typeof dues,
+        isNull: dues === null,
+        isEmpty: dues === ''
+      });
+      
+      if (dues === null || dues === '') {
+        // Set dues to null if empty
+        updatePayload.dues = null;
+        console.log('✅ Setting dues to null');
+      } else {
+        // Set dues amount (ensure it's a number)
+        const duesAmount = typeof dues === 'number' ? dues : parseFloat(dues);
+        if (!isNaN(duesAmount) && duesAmount >= 0) {
+          updatePayload.dues = duesAmount;
+          console.log('✅ Setting dues to:', duesAmount);
+        } else {
+          console.error('❌ Invalid dues amount:', duesAmount);
+          return res.status(400).json({ error: 'Dues must be a valid number' });
+        }
+      }
+    } else {
+      console.log('⚠️  Dues not provided in request body');
+    }
+
     if (permissionsModified) {
       updatePayload.permissions = permissionsWorking;
     }
@@ -3084,7 +3484,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
       .from('users')
       .update(updatePayload)
       .eq('id', id)
-      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, email_verified, created_at, updated_at')
+      .select('id, name, email, user_type, phone, property_address, parcel_number, lot_number, permissions, dues, email_verified, created_at, updated_at')
       .single();
 
     if (updateError) {
@@ -3225,6 +3625,14 @@ app.patch('/api/admin/users/:id', async (req, res) => {
     }
 
     // Return the updated user
+    console.log('✅ PATCH /api/admin/users/:id - Returning updated user:', {
+      userId: updatedUser.id,
+      email: updatedUser.email,
+      homeowner_status: updatedUser.homeowner_status,
+      dues: updatedUser.dues,
+      duesFromRaw: updatedUserRaw?.dues,
+      fullUpdatedUser: updatedUser
+    });
     res.json({ success: true, user: updatedUser });
   } catch (error) {
     console.error('Error updating user:', error);
@@ -3294,6 +3702,15 @@ app.listen(PORT, () => {
   console.log(`\n🚀 Local API server running on http://localhost:${PORT}`);
   console.log(`📡 Ready to handle payment intents`);
   console.log(`📧 Ready to handle email notifications`);
-  console.log(`💳 Stripe configured: ${process.env.STRIPE_SECRET_KEY ? 'Yes ✅' : 'No ❌'}\n`);
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (stripeKey) {
+    const keyPrefix = stripeKey.substring(0, 7);
+    const isTest = keyPrefix === 'sk_test';
+    const isLive = keyPrefix === 'sk_live';
+    console.log(`💳 Stripe configured: Yes ✅ (${isTest ? 'TEST MODE' : isLive ? 'LIVE MODE' : 'UNKNOWN KEY FORMAT'})`);
+  } else {
+    console.log(`💳 Stripe configured: No ❌ (STRIPE_SECRET_KEY not set)`);
+  }
+  console.log('');
 });
 

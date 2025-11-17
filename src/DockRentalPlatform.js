@@ -284,6 +284,8 @@ const DockRentalPlatform = () => {
   const [propertyOwnersLoading, setPropertyOwnersLoading] = useState(false);
   const [propertyOwnersError, setPropertyOwnersError] = useState(null);
   const [showPropertyOwnerEditModal, setShowPropertyOwnerEditModal] = useState(false);
+  const [showDuesPayment, setShowDuesPayment] = useState(false);
+  const [duesPaymentProcessing, setDuesPaymentProcessing] = useState(false);
   const [editingPropertyOwner, setEditingPropertyOwner] = useState(null);
   const [propertyOwnerSaving, setPropertyOwnerSaving] = useState(false);
   const [propertyOwnerFormErrors, setPropertyOwnerFormErrors] = useState({});
@@ -591,7 +593,8 @@ const DockRentalPlatform = () => {
         propertyAddress: owner.property_address || '',
         parcelNumber: owner.parcel_number || '',
         lotNumber: owner.lot_number || '',
-        homeownerStatus: owner.homeowner_status || ''
+        homeownerStatus: owner.homeowner_status || '',
+        dues: owner.dues || null
       });
       setPropertyOwnerFormErrors({});
       setPropertyOwnerSaving(false);
@@ -647,7 +650,10 @@ const DockRentalPlatform = () => {
         propertyAddress: sanitizeOptional(editingPropertyOwner.propertyAddress),
         parcelNumber: sanitizeOptional(editingPropertyOwner.parcelNumber),
         lotNumber: sanitizeOptional(editingPropertyOwner.lotNumber),
-        homeownerStatus: sanitizeOptional(editingPropertyOwner.homeownerStatus)
+        homeownerStatus: sanitizeOptional(editingPropertyOwner.homeownerStatus),
+        dues: editingPropertyOwner.dues !== undefined && editingPropertyOwner.dues !== null && editingPropertyOwner.dues !== '' 
+          ? parseFloat(editingPropertyOwner.dues) 
+          : null
       };
 
       const response = await fetch(`${API_BASE_URL}/api/admin/users/${editingPropertyOwner.id}`, {
@@ -665,6 +671,13 @@ const DockRentalPlatform = () => {
       }
 
       const updatedOwner = responseData.user;
+      console.log('Property owner update response:', {
+        updatedOwner,
+        dues: updatedOwner?.dues,
+        homeownerStatus: updatedOwner?.homeowner_status || updatedOwner?.homeownerStatus,
+        payload: payload
+      });
+      
       setPropertyOwners((prev) =>
         sortPropertyOwners(
           prev.map((owner) => (owner.id === updatedOwner.id ? updatedOwner : owner))
@@ -2025,6 +2038,60 @@ const DockRentalPlatform = () => {
     // Could be used for future payment method support if needed
   };
 
+  const handleDuesPayment = async (paymentResult) => {
+    if (!currentUser || !currentUser.dues) {
+      return;
+    }
+
+    setDuesPaymentProcessing(true);
+    try {
+      // Process payment via backend
+      const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+      const response = await fetch(`${apiUrl}/api/pay-dues`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          amount: currentUser.dues,
+          paymentIntentId: paymentResult.paymentIntentId
+        }),
+      });
+
+      const result = await response.json();
+      if (response.ok && result.success) {
+        // Update current user to remove dues and reactivate
+        const updatedUser = {
+          ...currentUser,
+          dues: null,
+          homeowner_status: 'verified',
+          homeownerStatus: 'verified'
+        };
+        setCurrentUser(updatedUser);
+        setShowDuesPayment(false);
+        
+        // Refresh notifications to show the payment success notification
+        // Add a small delay to ensure backend has created the notification
+        if (updatedUser.id) {
+          console.log('🔄 Refreshing notifications after dues payment...');
+          setTimeout(() => {
+            fetchNotifications(updatedUser.id);
+          }, 1000); // Wait 1 second for backend to create notification
+        }
+        
+        alert('✅ Payment successful! Your account has been reactivated.');
+      } else {
+        throw new Error(result.error || 'Payment processing failed');
+      }
+    } catch (error) {
+      console.error('Dues payment error:', error);
+      alert(`❌ Payment failed: ${error.message || 'Please try again.'}`);
+    } finally {
+      setDuesPaymentProcessing(false);
+    }
+  };
+
   const handlePaymentComplete = async (paymentResult) => {
     try {
       // Get current user data for the booking
@@ -2869,6 +2936,14 @@ const DockRentalPlatform = () => {
         userProfile.user_type = normalizeUserType(userProfile.user_type || userProfile.userType || userProfile.user_role);
         
         // Set user state
+        console.log('AUTH DEBUG - Setting currentUser with profile:', {
+          id: userProfile.id,
+          email: userProfile.email,
+          user_type: userProfile.user_type,
+          homeowner_status: userProfile.homeowner_status || userProfile.homeownerStatus,
+          dues: userProfile.dues,
+          fullProfile: userProfile
+        });
         setCurrentUser(userProfile);
         setShowLoginModal(false);
         setLoginData({ email: '', password: '' });
@@ -4811,7 +4886,74 @@ const DockRentalPlatform = () => {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8">
-        {showPaymentPage ? (
+        {/* Dues Payment Banner for Inactive Homeowners */}
+        {(() => {
+          const isHomeowner = currentUser && normalizeUserType(currentUser.user_type || currentUser.userType) === 'homeowner';
+          const homeownerStatus = (currentUser?.homeowner_status || currentUser?.homeownerStatus || '').toString().toLowerCase();
+          const isInactive = homeownerStatus === 'inactive_owner';
+          const hasDues = currentUser?.dues && parseFloat(currentUser.dues) > 0;
+          
+          // Debug logging
+          if (isHomeowner && isInactive) {
+            console.log('Dues Banner Check:', {
+              isHomeowner,
+              homeownerStatus,
+              isInactive,
+              dues: currentUser.dues,
+              hasDues,
+              currentUser: currentUser
+            });
+          }
+          
+          return isHomeowner && isInactive && hasDues;
+        })() && (
+            <div className="bg-red-50 border-l-4 border-red-500 p-4 mb-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0">
+                    <span className="text-red-500 text-2xl">⚠️</span>
+                  </div>
+                  <div className="ml-3">
+                    <h3 className="text-lg font-semibold text-red-800">
+                      Account Inactive - Outstanding Dues
+                    </h3>
+                    <p className="text-sm text-red-700 mt-1">
+                      Your account is inactive. Please pay your outstanding dues of <strong>${parseFloat(currentUser.dues).toFixed(2)}</strong> to reactivate your account and resume booking dock slips.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowDuesPayment(true)}
+                  disabled={duesPaymentProcessing}
+                  className={`ml-4 px-6 py-2 rounded-md text-white font-medium ${
+                    duesPaymentProcessing
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-red-600 hover:bg-red-700'
+                  }`}
+                >
+                  {duesPaymentProcessing ? 'Processing...' : 'Pay Dues Now'}
+                </button>
+              </div>
+            </div>
+          )}
+
+        {showDuesPayment ? (
+          <PaymentPage
+            bookingData={{
+              guestName: currentUser?.name || '',
+              guestEmail: currentUser?.email || '',
+              guestPhone: currentUser?.phone || '',
+              userType: 'homeowner'
+            }}
+            selectedSlip={{
+              name: 'Dues Payment',
+              price_per_night: currentUser?.dues || 0
+            }}
+            onPaymentComplete={handleDuesPayment}
+            onBack={() => setShowDuesPayment(false)}
+            isDuesPayment={true}
+          />
+        ) : showPaymentPage ? (
           <PaymentPage
             bookingData={bookingData}
             selectedSlip={selectedSlip}
@@ -7836,6 +7978,26 @@ const DockRentalPlatform = () => {
                   Use "Verified" once ownership has been confirmed.
                 </p>
               </div>
+
+              {editingPropertyOwner.homeownerStatus === 'inactive_owner' && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Outstanding Dues ($)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={editingPropertyOwner.dues || ''}
+                    onChange={(e) => updatePropertyOwnerForm('dues', e.target.value)}
+                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="0.00"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Enter the amount the homeowner needs to pay to reactivate their account.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center justify-end mt-6 space-x-3">

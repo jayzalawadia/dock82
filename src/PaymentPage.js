@@ -137,11 +137,17 @@ const PaymentFormContent = ({ bookingData, onPaymentComplete, clientSecret }) =>
 };
 
 // Outer component that creates Elements with clientSecret
-const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack }) => {
+const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack, isDuesPayment = false }) => {
   const [clientSecret, setClientSecret] = useState(null);
   const [paymentError, setPaymentError] = useState(null);
 
   const calculateTotal = () => {
+    // For dues payments, use the price_per_night directly (which contains the dues amount)
+    if (isDuesPayment && selectedSlip?.price_per_night) {
+      return selectedSlip.price_per_night;
+    }
+    
+    // For regular bookings, calculate based on dates
     if (!bookingData.checkIn || !bookingData.checkOut || !selectedSlip) return 0;
     const checkIn = new Date(bookingData.checkIn);
     const checkOut = new Date(bookingData.checkOut);
@@ -154,6 +160,12 @@ const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack }) =
     const createPaymentIntent = async () => {
       try {
         const totalAmount = calculateTotal();
+        
+        if (!totalAmount || totalAmount <= 0) {
+          setPaymentError('Invalid payment amount. Please contact support.');
+          return;
+        }
+        
         const localApiUrl = process.env.REACT_APP_API_URL;
         const fnUrl = `${localApiUrl || supabase.functions.url}/api/create-payment-intent`;
 
@@ -163,7 +175,15 @@ const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack }) =
           body: JSON.stringify({
             amount: totalAmount,
             currency: 'usd',
-            booking: {
+            booking: isDuesPayment ? {
+              // For dues payments, send minimal booking data
+              slip_id: null,
+              slip_name: 'Dues Payment',
+              guest_email: bookingData.guestEmail,
+              guest_name: bookingData.guestName,
+              guest_phone: bookingData.guestPhone,
+              user_type: bookingData.userType || 'homeowner',
+            } : {
               slip_id: selectedSlip?.id,
               slip_name: selectedSlip?.name,
               guest_email: bookingData.guestEmail,
@@ -215,18 +235,36 @@ const PaymentPage = ({ bookingData, selectedSlip, onPaymentComplete, onBack }) =
           </div>
           
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <h2 className="text-xl font-semibold text-blue-900 mb-3">Booking Summary</h2>
+            <h2 className="text-xl font-semibold text-blue-900 mb-3">
+              {isDuesPayment ? 'Payment Summary' : 'Booking Summary'}
+            </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              <div>
-                <p><strong>Slip:</strong> {selectedSlip?.name}</p>
-                <p><strong>Dates:</strong> {bookingData.checkIn} to {bookingData.checkOut}</p>
-                <p><strong>Guest:</strong> {bookingData.guestName}</p>
-              </div>
-              <div>
-                <p><strong>Boat Length:</strong> {bookingData.boatLength}ft</p>
-                <p><strong>Nights:</strong> {Math.ceil((new Date(bookingData.checkOut) - new Date(bookingData.checkIn)) / (1000 * 60 * 60 * 24))}</p>
-                <p className="text-lg font-bold text-green-600">Total: ${calculateTotal()}</p>
-              </div>
+              {isDuesPayment ? (
+                <>
+                  <div>
+                    <p><strong>Payment Type:</strong> Outstanding Dues</p>
+                    <p><strong>Account:</strong> {bookingData.guestName}</p>
+                    <p><strong>Email:</strong> {bookingData.guestEmail}</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-bold text-green-600">Amount Due: ${calculateTotal().toFixed(2)}</p>
+                    <p className="text-xs text-gray-600 mt-2">Your account will be reactivated after payment</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <p><strong>Slip:</strong> {selectedSlip?.name}</p>
+                    <p><strong>Dates:</strong> {bookingData.checkIn} to {bookingData.checkOut}</p>
+                    <p><strong>Guest:</strong> {bookingData.guestName}</p>
+                  </div>
+                  <div>
+                    <p><strong>Boat Length:</strong> {bookingData.boatLength}ft</p>
+                    <p><strong>Nights:</strong> {Math.ceil((new Date(bookingData.checkOut) - new Date(bookingData.checkIn)) / (1000 * 60 * 60 * 24))}</p>
+                    <p className="text-lg font-bold text-green-600">Total: ${calculateTotal().toFixed(2)}</p>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
