@@ -7048,15 +7048,6 @@ const DockRentalPlatform = () => {
                                     >
                                       ✏️ Edit
                                     </button>
-                                    {superAdminMode && hasValidOwnerEmail(owner) && (
-                                      <button
-                                        onClick={() => promotePropertyOwnerToAdmin(owner)}
-                                        className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                                        title="Promote to Admin (Superadmin Only)"
-                                      >
-                                        👑 Make Admin
-                                      </button>
-                                    )}
                                     <button
                                       onClick={() => handleDeletePropertyOwner(owner)}
                                       disabled={propertyOwnerDeletingId === owner.id}
