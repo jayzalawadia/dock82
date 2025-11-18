@@ -3484,41 +3484,44 @@ const DockRentalPlatform = () => {
   };
 
   const handleLogout = async () => {
+    // Clear local state first (this is what matters for the UI)
+    setCurrentUser(null);
+    setAdminMode(false);
+    setSuperAdminMode(false);
+    setUserBookings([]);
+    setCurrentView('browse');
+    setAuthStep('login');
+    setTempEmail('');
+    setLoginData({ email: '', password: '' });
+    setRegisterData({ 
+      name: '', 
+      email: '', 
+      password: '', 
+      confirmPassword: '',
+      phone: '',
+      userType: 'renter'
+    });
+    setShowProfileModal(false);
+    setNotifications([]);
+    
+    // Try to sign out from Supabase (but don't block on errors)
+    // If session is already missing or expired, that's fine - we've already cleared local state
     try {
-      // Sign out from Supabase (this will trigger the auth state change listener)
-      const { error } = await supabase.auth.signOut();
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
       
-      if (error) {
-        console.error('AUTH DEBUG - Error signing out:', error);
-        alert('Error signing out. Please try again.');
-        return;
+      // Only log non-critical errors (session missing is expected if already logged out)
+      if (error && !error.message?.includes('session missing') && !error.message?.includes('Auth session missing')) {
+        console.warn('AUTH DEBUG - Non-critical error during signOut (local state already cleared):', error.message);
       }
-      
-      // Clear local state (this will also be handled by the auth state change listener)
-      setCurrentUser(null);
-      setAdminMode(false);
-      setSuperAdminMode(false);
-      setUserBookings([]);
-      setCurrentView('browse');
-      setAuthStep('login');
-      setTempEmail('');
-      setLoginData({ email: '', password: '' });
-      setRegisterData({ 
-        name: '', 
-        email: '', 
-        password: '', 
-        confirmPassword: '',
-        phone: '',
-        userType: 'renter'
-      });
-      setShowProfileModal(false);
-      setNotifications([]);
-      
-      console.log('AUTH DEBUG - Logout successful');
     } catch (error) {
-      console.error('AUTH DEBUG - Unexpected error during logout:', error);
-      alert('An unexpected error occurred during logout.');
+      // Ignore errors - local state is already cleared, so logout is effectively complete
+      // Session missing errors are harmless and can be ignored
+      if (!error.message?.includes('session missing') && !error.message?.includes('Auth session missing')) {
+        console.warn('AUTH DEBUG - Error during signOut (local state already cleared):', error.message);
+      }
     }
+    
+    console.log('AUTH DEBUG - Logout complete (local state cleared)');
   };
 
   // Handle opening profile edit modal
