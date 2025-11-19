@@ -373,6 +373,7 @@ const DockRentalPlatform = () => {
 
       const data = await response.json();
       const usersList = data.users || [];
+      console.log('Loaded users:', usersList.length, usersList.map(u => ({ email: u.email, user_type: u.user_type || u.userType })));
       setAllUsers(usersList);
       const homeownersFromUsers = usersList.filter(
         (user) => normalizeUserType(user.user_type || user.userType || user.user_role) === 'homeowner'
@@ -409,19 +410,8 @@ const DockRentalPlatform = () => {
       const data = await response.json();
       const owners = (data.users || []).filter((user) => {
         const normalizedType = normalizeUserType(user.user_type || user.userType || user.user_role);
-        
-        // Explicitly exclude admins and superadmins from property owners list
-        if (normalizedType === 'admin' || normalizedType === 'superadmin') {
-          return false;
-        }
-        
-        const hasOwnerStatus = Boolean(
-          (user.homeowner_status || '').toString().trim()
-        );
-        const hasOwnerDetails = Boolean(
-          (user.property_address || user.parcel_number || user.lot_number || '').toString().trim()
-        );
-        return normalizedType === 'homeowner' || hasOwnerStatus || hasOwnerDetails;
+        // Only show users with user_type = 'homeowner'
+        return normalizedType === 'homeowner';
       });
       setPropertyOwners(sortPropertyOwners(owners));
     } catch (error) {
@@ -709,11 +699,19 @@ const DockRentalPlatform = () => {
     if (!newPropertyOwnerForm.name.trim()) {
       errors.name = 'Name is required';
     }
-    if (newPropertyOwnerForm.email.trim()) {
+    if (!newPropertyOwnerForm.email.trim()) {
+      errors.email = 'Email is required';
+    } else {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(newPropertyOwnerForm.email.trim())) {
         errors.email = 'Please enter a valid email address';
       }
+    }
+    if (!newPropertyOwnerForm.propertyAddress.trim()) {
+      errors.propertyAddress = 'Property Address is required';
+    }
+    if (!newPropertyOwnerForm.lotNumber.trim()) {
+      errors.lotNumber = 'Lot Number is required';
     }
     if (!newPropertyOwnerForm.userType) {
       errors.userType = 'User type is required';
@@ -1448,6 +1446,13 @@ const DockRentalPlatform = () => {
       loadAllUsers();
     }
   }, [currentView, adminMode, allUsers.length]);
+  
+  useEffect(() => {
+    // Load all users when viewing admin overview to ensure Registered Renters section has accurate data
+    if (currentView === 'admin' && adminView === 'overview' && adminMode && allUsers.length === 0) {
+      loadAllUsers();
+    }
+  }, [currentView, adminView, adminMode, allUsers.length, loadAllUsers]);
 
   // Re-transform bookings when slips are loaded to add slipName
   useEffect(() => {
@@ -3083,8 +3088,15 @@ const DockRentalPlatform = () => {
           return;
         }
 
+        // Validate that lot number contains only numbers
+        const lotNumberTrimmed = registerData.lotNumber.trim();
+        if (lotNumberTrimmed && !/^\d+$/.test(lotNumberTrimmed)) {
+          alert('❌ Lot Number must contain only numbers. Please enter a valid Lot number.');
+          return;
+        }
+
         const normalizedAddress = registerData.propertyAddress.trim().toLowerCase();
-        const normalizedLot = registerData.lotNumber.trim();
+        const normalizedLot = lotNumberTrimmed;
 
         if (propertyOwners.length) {
           const matchingOwner = propertyOwners.find(
@@ -3170,8 +3182,7 @@ const DockRentalPlatform = () => {
             phone: registerData.phone,
             userType: registerData.userType ? registerData.userType.toLowerCase() : 'renter',
             propertyAddress: propertyAddressPayload,
-            lotNumber: lotNumberPayload,
-            emergencyContact: registerData.emergencyContact
+            lotNumber: lotNumberPayload
           })
         });
       } catch (fetchError) {
@@ -3718,8 +3729,6 @@ const DockRentalPlatform = () => {
     const nameValue = (editingAdmin.name || '').trim();
     const emailValue = (editingAdmin.email || '').trim();
     const phoneValue = (editingAdmin.phone || '').trim();
-    // Preserve the existing userType - don't allow changing it through the edit form
-    const userTypeValue = normalizeUserType(editingAdmin.userType || editingAdmin.user_type || 'admin');
 
     if (!nameValue) {
       errors.name = 'Name is required';
@@ -3744,8 +3753,8 @@ const DockRentalPlatform = () => {
     const payload = {
       name: nameValue,
       email: emailValue.toLowerCase(),
-      phone: phoneValue || null,
-      userType: userTypeValue // Keep existing userType, don't change it
+      phone: phoneValue || null
+      // userType is not included - it should remain unchanged
     };
 
     try {
@@ -4372,22 +4381,33 @@ const DockRentalPlatform = () => {
   };
 
   const handleEditUser = (userEmail) => {
-    const userBookings = bookings.filter(b => b.guestEmail === userEmail);
-    const latestBooking = userBookings[userBookings.length - 1];
+    // First try to get user data from allUsers (users table)
+    const user = allUsers.find(u => (u.email || '').toLowerCase().trim() === (userEmail || '').toLowerCase().trim());
+    
+    // Fallback to booking data if user not found
+    const userBookings = bookings.filter(b => (b.guestEmail || '').toLowerCase().trim() === (userEmail || '').toLowerCase().trim());
+    const latestBooking = userBookings.length > 0 ? userBookings[userBookings.length - 1] : null;
+    
     setEditingUser({
       email: userEmail,
-      name: latestBooking.guestName,
-      phone: latestBooking.guestPhone || '',
-      userType: latestBooking.userType
+      name: user?.name || latestBooking?.guestName || userEmail?.split('@')[0] || '',
+      phone: user?.phone || latestBooking?.guestPhone || '',
+      userType: user ? normalizeUserType(user.user_type || user.userType || user.user_role) : (latestBooking?.userType || 'renter'),
+      id: user?.id
     });
     setShowUserEditModal(true);
   };
 
   const handleSaveUser = async () => {
     if (editingUser) {
+      if (!editingUser.id) {
+        alert('❌ Cannot update user: User ID is missing. Please refresh the page and try again.');
+        return;
+      }
+      
       try {
         // Save to database
-        const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/users`, {
+        const response = await fetch(`${API_BASE_URL}/api/users`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -4397,8 +4417,8 @@ const DockRentalPlatform = () => {
             userId: editingUser.id,
             userData: {
               name: editingUser.name,
-              phone: editingUser.phone,
-              userType: editingUser.userType
+              phone: editingUser.phone
+              // userType is not included - it should remain unchanged
             }
           }),
         });
@@ -4406,7 +4426,16 @@ const DockRentalPlatform = () => {
         if (response.ok) {
           const result = await response.json();
           if (result.success) {
-            // Update local state
+            // Update local state - update allUsers
+            setAllUsers(prevUsers => 
+              prevUsers.map(user => 
+                user.id === editingUser.id 
+                  ? { ...user, name: editingUser.name, phone: editingUser.phone }
+                  : user
+              )
+            );
+            
+            // Update bookings
             const updatedBookings = bookings.map(booking => {
               if (booking.guestEmail === editingUser.email) {
                 return {
@@ -4421,12 +4450,17 @@ const DockRentalPlatform = () => {
             setBookings(updatedBookings);
             setEditingUser(null);
             setShowUserEditModal(false);
+            
+            // Reload allUsers to ensure data is in sync
+            await loadAllUsers();
+            
             alert('✅ User updated successfully!');
           } else {
             alert('❌ Failed to update user: ' + result.error);
           }
         } else {
-          throw new Error('Failed to update user');
+          const errorData = await response.json().catch(() => ({ error: 'Failed to update user' }));
+          throw new Error(errorData.error || 'Failed to update user');
         }
       } catch (error) {
         console.error('Error updating user:', error);
@@ -4438,9 +4472,9 @@ const DockRentalPlatform = () => {
   const handleDeleteUser = async (userEmail) => {
     if (window.confirm('Are you sure you want to delete this user? This will also delete all their bookings.')) {
       try {
-        const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+        const apiUrl = API_BASE_URL;
         // Delete from database using email-based endpoint
-        const response = await fetch(`${apiUrl}/api/admin/users/email/${encodeURIComponent(userEmail)}`, {
+        const response = await fetch(`${apiUrl}/api/admin/users/email?email=${encodeURIComponent(userEmail)}`, {
           method: 'DELETE',
           headers: {
             'Content-Type': 'application/json',
@@ -4450,9 +4484,16 @@ const DockRentalPlatform = () => {
         if (response.ok) {
           const result = await response.json();
           if (result.success) {
-            // Update local state
-            const updatedBookings = bookings.filter(booking => booking.guestEmail !== userEmail);
+            // Update local state - remove from allUsers
+            setAllUsers(prevUsers => prevUsers.filter(user => (user.email || '').toLowerCase().trim() !== (userEmail || '').toLowerCase().trim()));
+            
+            // Update bookings
+            const updatedBookings = bookings.filter(booking => (booking.guestEmail || '').toLowerCase().trim() !== (userEmail || '').toLowerCase().trim());
             setBookings(updatedBookings);
+            
+            // Reload allUsers to ensure data is in sync
+            await loadAllUsers();
+            
             alert('✅ User deleted successfully!');
           } else {
             const errorMsg = result.error || result.details || 'Unknown error';
@@ -6874,7 +6915,7 @@ const DockRentalPlatform = () => {
                         </div>
 
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Email (optional)</label>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
                           <input
                             type="email"
                             value={newPropertyOwnerForm.email}
@@ -6883,6 +6924,7 @@ const DockRentalPlatform = () => {
                               newPropertyOwnerErrors.email ? 'border-red-500' : 'border-gray-300'
                             }`}
                             placeholder="owner@example.com"
+                            required
                           />
                           {newPropertyOwnerErrors.email && (
                             <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.email}</p>
@@ -6923,9 +6965,15 @@ const DockRentalPlatform = () => {
                             type="text"
                             value={newPropertyOwnerForm.propertyAddress}
                             onChange={(e) => handleNewPropertyOwnerInput('propertyAddress', e.target.value)}
-                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                              newPropertyOwnerErrors.propertyAddress ? 'border-red-500' : 'border-gray-300'
+                            }`}
                             placeholder="e.g. 9654 Privateer Road LGI"
+                            required
                           />
+                          {newPropertyOwnerErrors.propertyAddress && (
+                            <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.propertyAddress}</p>
+                          )}
                         </div>
 
                         <div>
@@ -6945,9 +6993,15 @@ const DockRentalPlatform = () => {
                             type="text"
                             value={newPropertyOwnerForm.lotNumber}
                             onChange={(e) => handleNewPropertyOwnerInput('lotNumber', e.target.value)}
-                            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                              newPropertyOwnerErrors.lotNumber ? 'border-red-500' : 'border-gray-300'
+                            }`}
                             placeholder="Lot identifier"
+                            required
                           />
+                          {newPropertyOwnerErrors.lotNumber && (
+                            <p className="text-xs text-red-600 mt-1">{newPropertyOwnerErrors.lotNumber}</p>
+                          )}
                         </div>
 
                         <div>
@@ -7085,46 +7139,107 @@ const DockRentalPlatform = () => {
                   </div>
                 </div>
 
-                {/* Registered Users Section */}
+                {/* Registered Renters Section */}
                 <div className="mb-8">
-                  <h4 className="text-lg font-semibold mb-4 flex items-center">
-                    👥 Registered Users ({Array.from(new Set(bookings.map(b => b.guestEmail))).length})
-                  </h4>
-                  <div className="bg-white rounded-lg shadow overflow-hidden">
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-200">
-                        <thead className="bg-gray-50">
-                          <tr>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User Type</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bookings</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                          {Array.from(new Set(bookings.map(b => b.guestEmail))).map(email => {
-                            const userBookings = bookings.filter(b => b.guestEmail === email);
-                            const latestBooking = userBookings[userBookings.length - 1];
-                            const userType = latestBooking.userType;
-                            const totalBookings = userBookings.length;
-                            const confirmedBookings = userBookings.filter(b => b.status === 'confirmed').length;
-                            
-                            return (
-                              <tr key={email} className="hover:bg-gray-50">
-                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                  {latestBooking.guestName}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                  <a href={`mailto:${email}`} className="text-blue-600 hover:text-blue-800">
-                                    {email}
-                                  </a>
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                  {latestBooking.guestPhone || 'N/A'}
-                                </td>
+                  {(() => {
+                    // Ensure allUsers is loaded
+                    if (allUsers.length === 0 && adminMode) {
+                      loadAllUsers();
+                    }
+                    
+                    // Get all renters from allUsers (users table)
+                    const rentersFromUsers = allUsers.filter(u => {
+                      const userType = normalizeUserType(u.user_type || u.userType || u.user_role);
+                      const isRenter = userType === 'renter';
+                      if (isRenter) {
+                        console.log(`Found renter: ${u.email}, user_type=${u.user_type || u.userType}`);
+                      }
+                      return isRenter;
+                    });
+                    
+                    // Get all unique emails from bookings
+                    const allBookingEmails = Array.from(new Set(bookings.map(b => b.guestEmail).filter(Boolean)));
+                    
+                    console.log(`Total users: ${allUsers.length}, Renters: ${rentersFromUsers.length}, Booking emails: ${allBookingEmails.length}`);
+                    
+                    // If allUsers hasn't loaded yet, show loading state
+                    if (allUsers.length === 0) {
+                      return (
+                        <>
+                          <h4 className="text-lg font-semibold mb-4 flex items-center">
+                            👥 Registered Renters (Loading...)
+                          </h4>
+                          <div className="bg-white rounded-lg shadow p-4">
+                            <p className="text-gray-500">Loading user data...</p>
+                          </div>
+                        </>
+                      );
+                    }
+                    
+                    // Show all renters from users table (they are registered users)
+                    // Match with bookings to show booking info, but show all renters even without bookings
+                    const rentersToShow = rentersFromUsers.map(renter => {
+                      const renterEmailLower = (renter.email || '').toLowerCase().trim();
+                      const hasBookings = allBookingEmails.some(bookingEmail => 
+                        bookingEmail.toLowerCase().trim() === renterEmailLower
+                      );
+                      return {
+                        ...renter,
+                        hasBookings,
+                        emailLower: renterEmailLower
+                      };
+                    });
+                    
+                    console.log(`Renters to show: ${rentersToShow.length}`, rentersToShow.map(r => ({ email: r.email, hasBookings: r.hasBookings })));
+                    
+                    return (
+                      <>
+                        <h4 className="text-lg font-semibold mb-4 flex items-center">
+                          👥 Registered Renters ({rentersToShow.length})
+                        </h4>
+                        <div className="bg-white rounded-lg shadow overflow-hidden">
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone</th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User Type</th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bookings</th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody className="bg-white divide-y divide-gray-200">
+                                {rentersToShow.map(renterUser => {
+                                  // Find bookings for this renter (case-insensitive email match)
+                                  const userBookings = bookings.filter(b => 
+                                    (b.guestEmail || '').toLowerCase().trim() === renterUser.emailLower
+                                  );
+                                  
+                                  const latestBooking = userBookings.length > 0 ? userBookings[userBookings.length - 1] : null;
+                                  const userType = 'renter'; // We already filtered for renters
+                                  const totalBookings = userBookings.length;
+                                  const confirmedBookings = userBookings.filter(b => b.status === 'confirmed').length;
+                                  const email = renterUser.email; // Use the actual email from user object
+                                  
+                                  // Get name from user object or latest booking
+                                  const name = renterUser.name || latestBooking?.guestName || email?.split('@')[0] || 'Unknown';
+                                  const phone = renterUser.phone || latestBooking?.guestPhone || 'N/A';
+                                  
+                                  return (
+                                    <tr key={email} className="hover:bg-gray-50">
+                                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                        {name}
+                                      </td>
+                                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                        <a href={`mailto:${email}`} className="text-blue-600 hover:text-blue-800">
+                                          {email}
+                                        </a>
+                                      </td>
+                                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                        {phone}
+                                      </td>
                                 <td className="px-6 py-4 whitespace-nowrap">
                                   <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
                                     userType === 'homeowner' 
@@ -7134,41 +7249,35 @@ const DockRentalPlatform = () => {
                                     {userType === 'homeowner' ? 'Homeowner' : 'Renter'}
                                   </span>
                                 </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                  {totalBookings} total ({confirmedBookings} confirmed)
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                  <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                                    confirmedBookings > 0 
-                                      ? 'bg-green-100 text-green-800' 
-                                      : 'bg-yellow-100 text-yellow-800'
-                                  }`}>
-                                    {confirmedBookings > 0 ? 'Active' : 'Pending'}
-                                  </span>
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                  <div className="flex space-x-2">
-                                    <button
-                                      onClick={() => handleEditUser(email)}
-                                      className="text-blue-600 hover:text-blue-900 text-xs bg-blue-50 px-2 py-1 rounded"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      onClick={() => handleDeleteUser(email)}
-                                      className="text-red-600 hover:text-red-900 text-xs bg-red-50 px-2 py-1 rounded"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
+                                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                        {totalBookings} total ({confirmedBookings} confirmed)
+                                      </td>
+                                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                        <div className="flex space-x-2">
+                                          <button
+                                            onClick={() => handleEditUser(email)}
+                                            className="text-blue-600 hover:text-blue-900 text-xs bg-blue-50 px-2 py-1 rounded"
+                                          >
+                                            Edit
+                                          </button>
+                                          <button
+                                            onClick={() => handleDeleteUser(email)}
+                                            className="text-red-600 hover:text-red-900 text-xs bg-red-50 px-2 py-1 rounded"
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {/* User Statistics */}
@@ -7195,7 +7304,7 @@ const DockRentalPlatform = () => {
                         </div>
                       </div>
                       <div className="ml-4">
-                        <p className="text-sm font-medium text-gray-500">Registered Users</p>
+                        <p className="text-sm font-medium text-gray-500">Registered Renters</p>
                         <p className="text-lg font-semibold text-gray-900">{Array.from(new Set(bookings.map(b => b.guestEmail))).length}</p>
                       </div>
                     </div>
@@ -7640,24 +7749,20 @@ const DockRentalPlatform = () => {
                       <input
                         type="text"
                         value={registerData.lotNumber || ''}
-                        onChange={(e) => setRegisterData({...registerData, lotNumber: e.target.value})}
+                        onChange={(e) => {
+                          // Only allow numeric input
+                          const value = e.target.value.replace(/[^0-9]/g, '');
+                          setRegisterData({...registerData, lotNumber: value});
+                        }}
                         className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                         placeholder="Enter the Lot number associated with your property"
+                        pattern="[0-9]*"
+                        inputMode="numeric"
                         required
                       />
                         <p className="text-xs text-gray-500 mt-1">
-                          This must match the Lot number on record for your property. If you are unsure, contact Dock82 support.
+                          This must match the Lot number on record for your property. Only numbers are allowed. If you are unsure, contact Dock82 support.
                         </p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Emergency Contact</label>
-                      <input
-                        type="text"
-                        value={registerData.emergencyContact || ''}
-                        onChange={(e) => setRegisterData({...registerData, emergencyContact: e.target.value})}
-                        className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="Emergency contact name and phone"
-                      />
                     </div>
                   </div>
                 )}
@@ -7779,7 +7884,6 @@ const DockRentalPlatform = () => {
                   placeholder="(555) 123-4567"
                 />
               </div>
-
             </div>
 
             <div className="mt-6 flex items-center justify-end space-x-3">
@@ -8054,18 +8158,6 @@ const DockRentalPlatform = () => {
                     onChange={(e) => setEditingUser({...editingUser, phone: e.target.value})}
                     className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">User Type</label>
-                  <select
-                    value={editingUser.userType}
-                    onChange={(e) => setEditingUser({...editingUser, userType: e.target.value})}
-                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  >
-                    <option value="renter">Renter</option>
-                    <option value="homeowner">Homeowner</option>
-                  </select>
                 </div>
                 
                 <div className="flex space-x-3 pt-4">

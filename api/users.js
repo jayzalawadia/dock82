@@ -172,14 +172,21 @@ export default async function handler(req, res) {
             return res.status(400).json({ error: 'User ID and user data are required' });
           }
 
+          // Build update object - only include fields that are provided
+          const updateData = {
+            name: userData.name,
+            phone: userData.phone,
+            updated_at: new Date().toISOString()
+          };
+          
+          // Only update user_type if it's provided (for backward compatibility)
+          if (userData.userType !== undefined) {
+            updateData.user_type = userData.userType;
+          }
+          
           const { data: updatedUser, error: updateError } = await supabase
             .from('users')
-            .update({
-              name: userData.name,
-              phone: userData.phone,
-              user_type: userData.userType,
-              updated_at: new Date().toISOString()
-            })
+            .update(updateData)
             .eq('id', userId)
             .select()
             .single();

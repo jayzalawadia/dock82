@@ -2341,6 +2341,80 @@ app.get('/api/user-profile', async (req, res) => {
   }
 });
 
+// Update user endpoint
+app.post('/api/users', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ 
+        error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required'
+      });
+    }
+
+    const { action, userId, userData } = req.body;
+
+    if (action === 'update-user') {
+      if (!userId || !userData) {
+        return res.status(400).json({ error: 'User ID and user data are required' });
+      }
+
+      // Build update object - only include fields that are provided
+      const updateData = {
+        updated_at: new Date().toISOString()
+      };
+
+      if (userData.name !== undefined) {
+        updateData.name = userData.name;
+      }
+
+      if (userData.phone !== undefined) {
+        updateData.phone = userData.phone;
+      }
+
+      // Only update user_type if it's provided (for backward compatibility)
+      if (userData.userType !== undefined) {
+        updateData.user_type = userData.userType;
+      }
+
+      const { data: updatedUser, error: updateError } = await supabaseAdmin
+        .from('users')
+        .update(updateData)
+        .eq('id', userId)
+        .select('id, name, email, user_type, phone, permissions, created_at, updated_at')
+        .single();
+
+      if (updateError) {
+        console.error('Update user error:', updateError);
+        return res.status(500).json({ error: 'Failed to update user: ' + updateError.message });
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Transform user data to match frontend expectations
+      const userResponse = {
+        id: updatedUser.id,
+        name: updatedUser.name,
+        email: updatedUser.email,
+        userType: updatedUser.user_type,
+        phone: updatedUser.phone,
+        permissions: updatedUser.permissions || {}
+      };
+
+      return res.status(200).json({
+        success: true,
+        message: 'User updated successfully',
+        user: userResponse
+      });
+    } else {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
+  } catch (error) {
+    console.error('Error in /api/users:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 app.get('/api/available-slips', async (req, res) => {
   try {
     if (!supabaseAdmin) {
