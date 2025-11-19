@@ -3718,6 +3718,7 @@ const DockRentalPlatform = () => {
     const nameValue = (editingAdmin.name || '').trim();
     const emailValue = (editingAdmin.email || '').trim();
     const phoneValue = (editingAdmin.phone || '').trim();
+    // Preserve the existing userType - don't allow changing it through the edit form
     const userTypeValue = normalizeUserType(editingAdmin.userType || editingAdmin.user_type || 'admin');
 
     if (!nameValue) {
@@ -3730,9 +3731,6 @@ const DockRentalPlatform = () => {
       if (!emailRegex.test(emailValue)) {
         errors.email = 'Please enter a valid email address';
       }
-    }
-    if (!userTypeValue) {
-      errors.userType = 'Role is required';
     }
 
     if (Object.keys(errors).length > 0) {
@@ -3747,7 +3745,7 @@ const DockRentalPlatform = () => {
       name: nameValue,
       email: emailValue.toLowerCase(),
       phone: phoneValue || null,
-      userType: userTypeValue
+      userType: userTypeValue // Keep existing userType, don't change it
     };
 
     try {
@@ -4440,16 +4438,13 @@ const DockRentalPlatform = () => {
   const handleDeleteUser = async (userEmail) => {
     if (window.confirm('Are you sure you want to delete this user? This will also delete all their bookings.')) {
       try {
-        // Delete from database
-        const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/admin`, {
-          method: 'POST',
+        const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+        // Delete from database using email-based endpoint
+        const response = await fetch(`${apiUrl}/api/admin/users/email/${encodeURIComponent(userEmail)}`, {
+          method: 'DELETE',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            action: 'delete-user',
-            userEmail: userEmail
-          }),
         });
         
         if (response.ok) {
@@ -4460,14 +4455,19 @@ const DockRentalPlatform = () => {
             setBookings(updatedBookings);
             alert('✅ User deleted successfully!');
           } else {
-            alert('❌ Failed to delete user: ' + result.error);
+            const errorMsg = result.error || result.details || 'Unknown error';
+            const suggestion = result.suggestion ? `\n\n${result.suggestion}` : '';
+            alert(`❌ Failed to delete user: ${errorMsg}${suggestion}`);
           }
         } else {
-          throw new Error('Failed to delete user');
+          const errorData = await response.json().catch(() => ({ error: 'Failed to delete user' }));
+          const errorMsg = errorData.error || errorData.details || 'Failed to delete user';
+          const suggestion = errorData.suggestion ? `\n\n${errorData.suggestion}` : '';
+          throw new Error(`${errorMsg}${suggestion}`);
         }
       } catch (error) {
         console.error('Error deleting user:', error);
-        alert('❌ Failed to delete user. Please try again.');
+        alert('❌ Failed to delete user: ' + (error.message || 'Please try again.'));
       }
     }
   };
@@ -7780,27 +7780,6 @@ const DockRentalPlatform = () => {
                 />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                <select
-                  value={editingAdmin.userType}
-                  onChange={(e) => updateEditingAdmin('userType', e.target.value)}
-                  className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
-                    editingAdminErrors.userType ? 'border-red-500' : 'border-gray-300'
-                  }`}
-                >
-                  <option value="superadmin">Superadmin</option>
-                  <option value="admin">Admin</option>
-                  <option value="homeowner">Homeowner</option>
-                  <option value="renter">Renter</option>
-                </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  Choose "Homeowner" or "Renter" to remove admin access.
-                </p>
-                {editingAdminErrors.userType && (
-                  <p className="text-xs text-red-600 mt-1">{editingAdminErrors.userType}</p>
-                )}
-              </div>
             </div>
 
             <div className="mt-6 flex items-center justify-end space-x-3">

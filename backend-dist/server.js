@@ -3651,25 +3651,352 @@ app.delete('/api/admin/users/:id', async (req, res) => {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
-    const { data: deletedUser, error: deleteError } = await supabaseAdmin
+    // First, verify the user exists
+    const { data: userToDelete, error: userError } = await supabaseAdmin
       .from('users')
-      .delete()
+      .select('id, email, user_type')
       .eq('id', id)
-      .select('id, email')
       .single();
 
-    if (deleteError) {
-      console.error('Error deleting user:', deleteError);
-      return res.status(500).json({ error: 'Failed to delete user', details: deleteError.message });
-    }
-
-    if (!deletedUser) {
+    if (userError || !userToDelete) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({ success: true, user: deletedUser });
+    // Delete all notifications associated with this user BEFORE deleting the user
+    // This prevents constraint violations when the user is deleted
+    // Use a more aggressive approach to catch all notifications
+    
+    // First, get all notification IDs related to this user
+    const { data: relatedNotifications, error: fetchError } = await supabaseAdmin
+      .from('notifications')
+      .select('id')
+      .or(`created_by.eq.${id},recipient_user_id.eq.${id}`);
+
+    if (fetchError) {
+      console.warn('Could not fetch related notifications, trying direct delete:', fetchError);
+    }
+
+    // Delete notifications where this user is the recipient
+    const { error: deleteRecipientNotificationsError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('recipient_user_id', id);
+
+    if (deleteRecipientNotificationsError) {
+      console.error('Error deleting notifications where user is recipient:', deleteRecipientNotificationsError);
+      // Continue anyway - we'll try again in retry logic
+    }
+
+    // Delete notifications where this user is the creator
+    const { error: deleteCreatorNotificationsError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('created_by', id);
+
+    if (deleteCreatorNotificationsError) {
+      console.error('Error deleting notifications where user is creator:', deleteCreatorNotificationsError);
+      // Continue anyway - we'll try again in retry logic
+    }
+
+    // Also delete any notifications with null created_by that are for this user
+    // This handles edge cases where notifications might have been created incorrectly
+    const { error: deleteNullCreatedByError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .is('created_by', null)
+      .eq('recipient_user_id', id);
+
+    if (deleteNullCreatedByError) {
+      console.warn('Warning: Could not delete notifications with null created_by:', deleteNullCreatedByError);
+    }
+
+    // If we found related notifications, try to delete them by ID as a fallback
+    if (relatedNotifications && relatedNotifications.length > 0) {
+      const notificationIds = relatedNotifications.map(n => n.id);
+      for (const notifId of notificationIds) {
+        await supabaseAdmin
+          .from('notifications')
+          .delete()
+          .eq('id', notifId);
+      }
+    }
+
+    // Use raw SQL to delete user and all related notifications in one transaction
+    // This ensures proper order and avoids constraint violations
+    try {
+      const { data: sqlResult, error: sqlError } = await supabaseAdmin.rpc('delete_user_with_notifications', {
+        p_user_id: id
+      });
+
+      // If RPC function doesn't exist, fall back to manual deletion
+      if (sqlError && (sqlError.message?.includes('function') || sqlError.message?.includes('does not exist'))) {
+        console.log('RPC function not available, using manual deletion with retry logic');
+        
+        // Small delay to ensure all deletions are committed
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        // Now delete the user
+        const { data: deletedUser, error: deleteError } = await supabaseAdmin
+          .from('users')
+          .delete()
+          .eq('id', id)
+          .select('id, email')
+          .single();
+
+        if (deleteError) {
+          // If the error is about notifications, the issue is likely a database trigger
+          // Try one more comprehensive cleanup
+          if (deleteError.message?.includes('notifications') || deleteError.message?.includes('created_by')) {
+            console.log('Constraint error detected, performing final cleanup...');
+            
+            // Delete ALL notifications for this user one more time, including any with null created_by
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .eq('recipient_user_id', id);
+            
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .eq('created_by', id);
+
+            // Also try to delete any notifications with null created_by for this recipient
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .is('created_by', null)
+              .eq('recipient_user_id', id);
+
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Final attempt to delete user
+            const { data: finalDeletedUser, error: finalDeleteError } = await supabaseAdmin
+              .from('users')
+              .delete()
+              .eq('id', id)
+              .select('id, email')
+              .single();
+
+            if (finalDeleteError) {
+              console.error('Error deleting user after final cleanup:', finalDeleteError);
+              return res.status(500).json({ 
+                error: 'Failed to delete user. There may be a database trigger or constraint preventing deletion.', 
+                details: finalDeleteError.message,
+                suggestion: 'Please check database triggers and foreign key constraints on the notifications table.'
+              });
+            }
+
+            if (!finalDeletedUser) {
+              return res.status(404).json({ error: 'User not found' });
+            }
+
+            return res.json({ success: true, user: finalDeletedUser });
+          }
+
+          console.error('Error deleting user:', deleteError);
+          return res.status(500).json({ error: 'Failed to delete user', details: deleteError.message });
+        }
+
+        if (!deletedUser) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+
+        return res.json({ success: true, user: deletedUser });
+      } else if (sqlError) {
+        console.error('Error in RPC function:', sqlError);
+        return res.status(500).json({ error: 'Failed to delete user', details: sqlError.message });
+      } else {
+        // RPC function succeeded
+        return res.json({ success: true, user: { id, email: userToDelete.email } });
+      }
+    } catch (error) {
+      console.error('Unexpected error during user deletion:', error);
+      return res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
   } catch (error) {
     console.error('Error deleting user:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Delete user by email endpoint
+app.delete('/api/admin/users/email/:email', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'Server configuration error: SUPABASE_SERVICE_ROLE_KEY is required' });
+    }
+
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ error: 'User email is required' });
+    }
+
+    // First, get the user by email to find their ID
+    const { data: userToDelete, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('id, email, user_type')
+      .eq('email', email)
+      .single();
+
+    if (userError || !userToDelete) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userId = userToDelete.id;
+
+    // Delete all notifications associated with this user BEFORE deleting the user
+    // This prevents constraint violations when the user is deleted
+    // Use a more aggressive approach to catch all notifications
+    
+    // First, get all notification IDs related to this user
+    const { data: relatedNotifications, error: fetchError } = await supabaseAdmin
+      .from('notifications')
+      .select('id')
+      .or(`created_by.eq.${userId},recipient_user_id.eq.${userId}`);
+
+    if (fetchError) {
+      console.warn('Could not fetch related notifications, trying direct delete:', fetchError);
+    }
+
+    // Delete notifications where this user is the recipient
+    const { error: deleteRecipientNotificationsError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('recipient_user_id', userId);
+
+    if (deleteRecipientNotificationsError) {
+      console.error('Error deleting notifications where user is recipient:', deleteRecipientNotificationsError);
+      // Continue anyway - we'll try again in retry logic
+    }
+
+    // Delete notifications where this user is the creator
+    const { error: deleteCreatorNotificationsError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('created_by', userId);
+
+    if (deleteCreatorNotificationsError) {
+      console.error('Error deleting notifications where user is creator:', deleteCreatorNotificationsError);
+      // Continue anyway - we'll try again in retry logic
+    }
+
+    // Also delete any notifications with null created_by that are for this user
+    // This handles edge cases where notifications might have been created incorrectly
+    const { error: deleteNullCreatedByError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .is('created_by', null)
+      .eq('recipient_user_id', userId);
+
+    if (deleteNullCreatedByError) {
+      console.warn('Warning: Could not delete notifications with null created_by:', deleteNullCreatedByError);
+    }
+
+    // If we found related notifications, try to delete them by ID as a fallback
+    if (relatedNotifications && relatedNotifications.length > 0) {
+      const notificationIds = relatedNotifications.map(n => n.id);
+      for (const notifId of notificationIds) {
+        await supabaseAdmin
+          .from('notifications')
+          .delete()
+          .eq('id', notifId);
+      }
+    }
+
+    // Use raw SQL to delete user and all related notifications in one transaction
+    // This ensures proper order and avoids constraint violations
+    try {
+      const { data: sqlResult, error: sqlError } = await supabaseAdmin.rpc('delete_user_with_notifications', {
+        p_user_id: userId
+      });
+
+      // If RPC function doesn't exist, fall back to manual deletion
+      if (sqlError && (sqlError.message?.includes('function') || sqlError.message?.includes('does not exist'))) {
+        console.log('RPC function not available, using manual deletion with retry logic');
+        
+        // Small delay to ensure all deletions are committed
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        // Now delete the user
+        const { data: deletedUser, error: deleteError } = await supabaseAdmin
+          .from('users')
+          .delete()
+          .eq('id', userId)
+          .select('id, email')
+          .single();
+
+        if (deleteError) {
+          // If the error is about notifications, the issue is likely a database trigger
+          // Try one more comprehensive cleanup
+          if (deleteError.message?.includes('notifications') || deleteError.message?.includes('created_by')) {
+            console.log('Constraint error detected, performing final cleanup...');
+            
+            // Delete ALL notifications for this user one more time, including any with null created_by
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .eq('recipient_user_id', userId);
+            
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .eq('created_by', userId);
+
+            // Also try to delete any notifications with null created_by for this recipient
+            await supabaseAdmin
+              .from('notifications')
+              .delete()
+              .is('created_by', null)
+              .eq('recipient_user_id', userId);
+
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Final attempt to delete user
+            const { data: finalDeletedUser, error: finalDeleteError } = await supabaseAdmin
+              .from('users')
+              .delete()
+              .eq('id', userId)
+              .select('id, email')
+              .single();
+
+            if (finalDeleteError) {
+              console.error('Error deleting user after final cleanup:', finalDeleteError);
+              return res.status(500).json({ 
+                error: 'Failed to delete user. There may be a database trigger or constraint preventing deletion.', 
+                details: finalDeleteError.message,
+                suggestion: 'Please check database triggers and foreign key constraints on the notifications table.'
+              });
+            }
+
+            if (!finalDeletedUser) {
+              return res.status(404).json({ error: 'User not found' });
+            }
+
+            return res.json({ success: true, user: finalDeletedUser });
+          }
+
+          console.error('Error deleting user:', deleteError);
+          return res.status(500).json({ error: 'Failed to delete user', details: deleteError.message });
+        }
+
+        if (!deletedUser) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+
+        return res.json({ success: true, user: deletedUser });
+      } else if (sqlError) {
+        console.error('Error in RPC function:', sqlError);
+        return res.status(500).json({ error: 'Failed to delete user', details: sqlError.message });
+      } else {
+        // RPC function succeeded
+        return res.json({ success: true, user: { id: userId, email: userToDelete.email } });
+      }
+    } catch (error) {
+      console.error('Unexpected error during user deletion:', error);
+      return res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
+  } catch (error) {
+    console.error('Error deleting user by email:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
