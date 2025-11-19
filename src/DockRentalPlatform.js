@@ -409,6 +409,12 @@ const DockRentalPlatform = () => {
       const data = await response.json();
       const owners = (data.users || []).filter((user) => {
         const normalizedType = normalizeUserType(user.user_type || user.userType || user.user_role);
+        
+        // Explicitly exclude admins and superadmins from property owners list
+        if (normalizedType === 'admin' || normalizedType === 'superadmin') {
+          return false;
+        }
+        
         const hasOwnerStatus = Boolean(
           (user.homeowner_status || '').toString().trim()
         );
