@@ -68,6 +68,33 @@ const resolveDefaultFromAddress = () => {
 const DEFAULT_EMAIL_FROM = resolveDefaultFromAddress();
 console.log('📧 Using email from address:', DEFAULT_EMAIL_FROM);
 
+// Helper function to get the correct base URL for emails
+const getBaseUrl = (req) => {
+  // Check for explicit environment variable first
+  if (process.env.FRONTEND_URL) {
+    return process.env.FRONTEND_URL;
+  }
+  
+  // Check if request origin is from production
+  const origin = req?.headers?.origin || '';
+  if (origin.includes('dock82.com') || origin.includes('www.dock82.com')) {
+    return origin;
+  }
+  
+  // Check if we're in production environment
+  if (process.env.NODE_ENV === 'production' || process.env.ENVIRONMENT === 'production') {
+    return 'https://www.dock82.com';
+  }
+  
+  // Use request origin if available
+  if (origin) {
+    return origin;
+  }
+  
+  // Default to production URL (safer than localhost)
+  return 'https://www.dock82.com';
+};
+
 // Determine allowed origins for CORS
 const defaultAllowedOrigins = [
   'http://localhost:3000',
@@ -989,7 +1016,8 @@ app.post('/api/register-user', async (req, res) => {
         if (shouldStoreTempPassword && finalPassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
           try {
             const userName = name || email.split('@')[0];
-            const loginUrl = `${req.headers.origin || 'http://localhost:3000'}/?temp-password=true`;
+            const baseUrl = getBaseUrl(req);
+            const loginUrl = `${baseUrl}/?temp-password=true`;
             const emailSubject = `Welcome to Dock82 - Your ${normalizedUserType === 'superadmin' ? 'Superadmin' : 'Admin'} Account`;
             const emailContent = generateAdminWelcomeEmail({
               name: userName,
@@ -1256,7 +1284,8 @@ app.post('/api/register-user', async (req, res) => {
       if (shouldStoreTempPassword && finalPassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
         try {
           const userName = name || email.split('@')[0];
-          const loginUrl = `${req.headers.origin || 'http://localhost:3000'}/?temp-password=true`;
+          const baseUrl = getBaseUrl(req);
+          const loginUrl = `${baseUrl}/?temp-password=true`;
           const emailSubject = `Welcome to Dock82 - Your ${normalizedUserType === 'superadmin' ? 'Superadmin' : 'Admin'} Account`;
           const emailContent = generateAdminWelcomeEmail({
             name: userName,
@@ -1597,7 +1626,8 @@ app.post('/api/password-reset', async (req, res) => {
       }
 
       const userName = userData?.name || email.split('@')[0];
-      const loginUrl = `${req.headers.origin || 'http://localhost:3000'}/?temp-password=true`;
+      const baseUrl = getBaseUrl(req);
+      const loginUrl = `${baseUrl}/?temp-password=true`;
 
       // Send password reset email via Resend
       const emailSubject = 'Your Temporary Password - Dock82';
