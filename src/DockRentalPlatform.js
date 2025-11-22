@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Calendar, MapPin, Anchor, Clock, DollarSign, User, Settings, Plus, Edit, Trash2, Check, X, Filter, Search, CreditCard, Lock, Eye, EyeOff } from 'lucide-react';
 import { loadStripe } from '@stripe/stripe-js';
 import { Elements } from '@stripe/react-stripe-js';
@@ -44,6 +44,25 @@ const buildDefaultAdminForm = () => ({
 });
 
 const DockRentalPlatform = () => {
+  // Check for temp-password mode BEFORE any state initialization
+  let initialTempPasswordMode = false;
+  if (typeof window !== 'undefined') {
+    const urlParams = new URLSearchParams(window.location.search);
+    initialTempPasswordMode = urlParams.get('temp-password') === 'true';
+    
+    // Check for expired recovery links in hash
+    const hash = window.location.hash;
+    if (hash && hash.length > 1) {
+      const hashStr = hash.toLowerCase();
+      // Check for expired recovery link patterns
+      if ((hashStr.includes('error=access_denied') || hashStr.includes('error_code=otp_expired')) && 
+          (hashStr.includes('type=recovery') || hashStr.includes('recovery'))) {
+        console.log('Expired recovery link detected, redirecting to forgot password');
+        window.location.replace('/?forgot=true&expired=true');
+      }
+    }
+  }
+  
   const [currentView, setCurrentView] = useState(null); // Start with null, will be set based on auth
   const [selectedSlip, setSelectedSlip] = useState(null);
   const [paymentProcessing, setPaymentProcessing] = useState(false);
@@ -114,7 +133,7 @@ const DockRentalPlatform = () => {
   const [adminView, setAdminView] = useState('overview'); // overview, bookings, financials, settings
   const [currentUser, setCurrentUser] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(true);
-  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [showLoginModal, setShowLoginModal] = useState(initialTempPasswordMode);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState({
@@ -264,10 +283,10 @@ const DockRentalPlatform = () => {
   });
 
   // New simplified authentication states
-  const [authStep, setAuthStep] = useState('login'); // 'login', 'register', 'verify-contact', 'forgot-password', 'reset-password'
+  const [authStep, setAuthStep] = useState(initialTempPasswordMode ? 'reset-password' : 'login'); // 'login', 'register', 'verify-contact', 'forgot-password', 'reset-password'
   const [tempEmail, setTempEmail] = useState('');
   const [showForgotPassword, setShowForgotPassword] = useState(false);
-  const [resetToken, setResetToken] = useState('');
+  const [tempPassword, setTempPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   
@@ -1242,6 +1261,20 @@ const DockRentalPlatform = () => {
     const initializeAuth = async () => {
       try {
         console.log('AUTH DEBUG - Initializing auth state...');
+        
+        // Check if we're in temp-password mode - if so, skip auto-login
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+        
+        if (isTempPasswordMode) {
+          console.log('AUTH DEBUG - Temp password mode detected in initializeAuth, skipping auto-login');
+          // Keep modal open and reset step active
+          setShowLoginModal(true);
+          setAuthStep('reset-password');
+          setSessionLoading(false);
+          return; // Don't proceed with session restoration
+        }
+        
         // Get the current session from Supabase
         const { data: { session }, error } = await supabase.auth.getSession();
         
@@ -1271,7 +1304,10 @@ const DockRentalPlatform = () => {
           }
           
           // Load user's bookings - filter by user_id (with fallback to email for backward compatibility)
-          updateUserBookingsFromList(bookings, userProfile);
+          // Only update if bookings are available
+          if (bookings && bookings.length > 0) {
+            updateUserBookingsFromList(bookings, userProfile);
+          }
           
           console.log('AUTH DEBUG - Session restored successfully');
             } else {
@@ -1313,8 +1349,44 @@ const DockRentalPlatform = () => {
       }
     };
 
-    // Initialize auth state
+    // Check for password reset parameter in URL FIRST (before auth init)
+    const urlParams = new URLSearchParams(window.location.search);
+    const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+    const isForgotMode = urlParams.get('forgot') === 'true';
+    const isExpired = urlParams.get('expired') === 'true';
+    
+    // If temp password mode, show login form with reset password step
+    // Set state immediately and ensure it persists
+    if (isTempPasswordMode) {
+      console.log('AUTH DEBUG - Temp password mode detected in useEffect, setting state');
+      // Use functional updates to ensure state is set
+      setShowLoginModal(true);
+      setAuthStep('reset-password');
+      // DON'T clean URL - keep it so the state persists
+      // We'll clean it only when the user successfully resets their password
+    }
+
+    // Initialize auth state (but don't let it override temp-password mode)
     initializeAuth();
+
+    // Safety timeout - ensure sessionLoading is set to false even if something hangs
+    const timeoutId = setTimeout(() => {
+      console.warn('AUTH DEBUG - Session loading timeout, forcing completion');
+      setSessionLoading(false);
+    }, 5000); // 5 second timeout (reduced from 10)
+    
+    if (isForgotMode) {
+      // Show forgot password form
+      setShowLoginModal(true);
+      setAuthStep('forgot-password');
+      if (isExpired) {
+        // Show message about expired link
+        setTimeout(() => {
+          alert('⚠️ The password reset link has expired. Please request a new password reset link.');
+        }, 100);
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
 
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -1322,6 +1394,61 @@ const DockRentalPlatform = () => {
         console.log('AUTH DEBUG - Auth state changed:', event, session?.user?.email);
         
         if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session?.user) {
+          // Check if user has a temp password - if so, show reset form
+          try {
+            const userCheckResponse = await fetch(`${API_BASE_URL}/api/user-profile?email=${encodeURIComponent(session.user.email)}`);
+            if (userCheckResponse.ok) {
+              const userCheckResult = await userCheckResponse.json();
+              if (userCheckResult.success && userCheckResult.profile) {
+                // Check if user has a temp password stored (in reset_token field)
+                if (userCheckResult.profile.reset_token && 
+                    userCheckResult.profile.reset_token_expires && 
+                    new Date(userCheckResult.profile.reset_token_expires) > new Date()) {
+                  // This is a temp password - show reset form instead of logging in
+                  console.log('AUTH DEBUG - Temporary password detected, showing reset form');
+                  setTempEmail(session.user.email);
+                  setShowLoginModal(true);
+                  setAuthStep('reset-password');
+                  // Don't set current user or load profile - user needs to reset password first
+                  return;
+                }
+              }
+            }
+          } catch (checkError) {
+            console.error('Error checking for temp password:', checkError);
+            // Continue with normal login if check fails
+          }
+          
+          // Check if we're in temp-password mode - if so, don't auto-login, show reset form instead
+          const urlParams = new URLSearchParams(window.location.search);
+          const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+          const isInResetStep = authStep === 'reset-password';
+          
+          if (isTempPasswordMode || isInResetStep) {
+            console.log('AUTH DEBUG - Temp password mode detected, keeping reset form open');
+            // Don't set user or close modal - user needs to reset password first
+            // Check if user has temp password
+            try {
+              const userCheckResponse = await fetch(`${API_BASE_URL}/api/user-profile?email=${encodeURIComponent(session.user.email)}`);
+              if (userCheckResponse.ok) {
+                const userCheckResult = await userCheckResponse.json();
+                if (userCheckResult.success && userCheckResult.profile) {
+                  if (userCheckResult.profile.reset_token && 
+                      userCheckResult.profile.reset_token_expires && 
+                      new Date(userCheckResult.profile.reset_token_expires) > new Date()) {
+                    // User has temp password - keep reset form open
+                    setShowLoginModal(true);
+                    setAuthStep('reset-password');
+                    setTempEmail(session.user.email);
+                    return;
+                  }
+                }
+              }
+            } catch (checkError) {
+              console.error('Error checking for temp password:', checkError);
+            }
+          }
+          
           // User signed in or token refreshed (including after email confirmation)
           console.log('AUTH DEBUG - User authenticated, ensuring profile exists in database');
           try {
@@ -1339,8 +1466,15 @@ const DockRentalPlatform = () => {
             }
           }
           
-          // Load user's bookings
-          updateUserBookingsFromList(bookings, userProfile);
+          // Load user's bookings - only if bookings are available
+          if (bookings && bookings.length >= 0) {
+            updateUserBookingsFromList(bookings, userProfile);
+          }
+          
+          // Only close login modal if not in reset-password step
+          if (authStep !== 'reset-password') {
+            setShowLoginModal(false);
+          }
           } else {
             // Profile not found - create minimal user from session
             console.warn('AUTH DEBUG - Profile not found, using minimal user from session');
@@ -1378,12 +1512,31 @@ const DockRentalPlatform = () => {
           setAdminMode(false);
           setSuperAdminMode(false);
           setUserBookings([]);
-          setAuthStep('login');
+          // Don't reset authStep if we're in temp-password mode
+          const urlParams = new URLSearchParams(window.location.search);
+          const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+          if (!isTempPasswordMode && authStep !== 'reset-password') {
+            setAuthStep('login');
+          }
+        } else if (event === 'INITIAL_SESSION' && !session) {
+          // Initial session check with no session - preserve temp-password mode if active
+          const urlParams = new URLSearchParams(window.location.search);
+          const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+          if (isTempPasswordMode) {
+            console.log('AUTH DEBUG - INITIAL_SESSION with no session, preserving temp-password mode');
+            setShowLoginModal(true);
+            setAuthStep('reset-password');
+          }
         }
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      if (subscription) {
+        subscription.unsubscribe();
+      }
+      clearTimeout(timeoutId);
+    };
   }, []);
 
 
@@ -2912,7 +3065,27 @@ const DockRentalPlatform = () => {
         
         // Handle specific auth errors
         if (authError.message.includes('Invalid login credentials')) {
-          alert('Invalid email or password. Please try again.');
+          // Check if this might be a temp password - if so, show reset form
+          // We'll check by trying to verify the temp password with the backend
+          try {
+            const checkResponse = await fetch(`${API_BASE_URL}/api/password-reset`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                action: 'check-temp-password',
+                email: loginData.email,
+                tempPassword: loginData.password
+              }),
+            });
+            
+            // If backend has a check endpoint, use it. Otherwise, just show error.
+            // For now, we'll assume if login fails, user should try reset password form
+            alert('Invalid email or password. If you received a temporary password, please use the "Reset Password" form.');
+          } catch (checkError) {
+            alert('Invalid email or password. Please try again.');
+          }
         } else if (authError.message.includes('Email not confirmed')) {
           console.log('AUTH DEBUG - Email not confirmed');
           alert('📧 Email verification required!\n\nPlease check your email and click the verification link to activate your account.\n\nIf you didn\'t receive the email, check your spam folder or contact support.');
@@ -2926,8 +3099,51 @@ const DockRentalPlatform = () => {
         return;
       }
 
+      // Check if the password used is a temporary password
+      // We'll check the users table to see if this password matches a temp password
+      try {
+        const checkTempResponse = await fetch(`${API_BASE_URL}/api/user-profile?email=${encodeURIComponent(loginData.email)}`);
+        if (checkTempResponse.ok) {
+          const userResult = await checkTempResponse.json();
+          if (userResult.success && userResult.profile) {
+            // Check if the password matches the stored temp password
+            // Note: We can't directly check this from frontend, but we can try to detect
+            // by checking if login succeeded but user has a temp password flag
+            // For now, we'll let the login proceed and handle temp password in reset form
+          }
+        }
+      } catch (checkError) {
+        // Ignore check errors
+      }
+
       if (authData.user) {
         console.log('AUTH DEBUG - Login successful, user:', authData.user);
+        
+        // Check if this is a temporary password by checking the users table
+        try {
+          const userCheckResponse = await fetch(`${API_BASE_URL}/api/user-profile?email=${encodeURIComponent(loginData.email)}`);
+          if (userCheckResponse.ok) {
+            const userCheckResult = await userCheckResponse.json();
+            if (userCheckResult.success && userCheckResult.profile) {
+              // Check if user has a temp password stored (in reset_token field)
+              if (userCheckResult.profile.reset_token && 
+                  userCheckResult.profile.reset_token_expires && 
+                  new Date(userCheckResult.profile.reset_token_expires) > new Date()) {
+                // This is a temp password - show reset form instead of logging in
+                console.log('AUTH DEBUG - Temporary password detected, showing reset form');
+                setTempEmail(loginData.email);
+                setTempPassword(loginData.password);
+                setAuthStep('reset-password');
+                setLoginData({ email: loginData.email, password: '' });
+                alert('⚠️ You are using a temporary password. Please set a new password to continue.');
+                return;
+              }
+            }
+          }
+        } catch (checkError) {
+          console.error('Error checking for temp password:', checkError);
+          // Continue with normal login if check fails
+        }
         
         // Now get or create the user profile in your users table
         let userProfile = await ensureUserProfile(authData.user);
@@ -2990,32 +3206,49 @@ const DockRentalPlatform = () => {
     console.log('AUTH DEBUG - Fetching user profile for:', authUser.email);
     
     try {
-      // Fetch profile from backend API (bypasses RLS)
+      // Fetch profile from backend API (bypasses RLS) with timeout
       const localApiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
-      const response = await fetch(`${localApiUrl}/api/user-profile?email=${encodeURIComponent(authUser.email)}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
       
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('AUTH DEBUG - Profile fetch failed:', response.status, errorData);
+      try {
+        const response = await fetch(`${localApiUrl}/api/user-profile?email=${encodeURIComponent(authUser.email)}`, {
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          console.error('AUTH DEBUG - Profile fetch failed:', response.status, errorData);
+          return null;
+        }
+        
+        const result = await response.json();
+        
+        if (result.success && result.profile) {
+          console.log('AUTH DEBUG - User profile found:', result.profile);
+          if (result.created) {
+            console.log('AUTH DEBUG - User profile created from Auth user');
+          }
+          return {
+            ...result.profile,
+            user_type: normalizeUserType(result.profile.user_type || result.profile.userType || result.profile.user_role)
+          };
+        }
+        
+        // Profile not found
+        console.log('AUTH DEBUG - Profile not found:', result.message || 'Unknown error');
+        return null;
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          console.warn('AUTH DEBUG - Profile fetch timed out, using minimal user');
+        } else {
+          throw fetchError;
+        }
         return null;
       }
-      
-      const result = await response.json();
-      
-      if (result.success && result.profile) {
-        console.log('AUTH DEBUG - User profile found:', result.profile);
-        if (result.created) {
-          console.log('AUTH DEBUG - User profile created from Auth user');
-        }
-        return {
-          ...result.profile,
-          user_type: normalizeUserType(result.profile.user_type || result.profile.userType || result.profile.user_role)
-        };
-      }
-      
-      // Profile not found
-      console.log('AUTH DEBUG - Profile not found:', result.message || 'Unknown error');
-      return null;
       
     } catch (error) {
       console.error('AUTH DEBUG - Error in ensureUserProfile:', error);
@@ -3974,7 +4207,7 @@ const DockRentalPlatform = () => {
     }
     
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/password-reset`, {
+      const response = await fetch(`${API_BASE_URL}/api/password-reset`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -3988,14 +4221,24 @@ const DockRentalPlatform = () => {
       if (response.ok) {
         const result = await response.json();
         if (result.success) {
-          alert(`Password reset token generated!\n\nFor testing purposes, your reset token is: ${result.resetToken}\n\nIn production, this would be sent to your email.`);
-          setResetToken(result.resetToken);
-          setAuthStep('reset-password');
+          alert(`✅ Password reset email sent!\n\nPlease check your inbox (${tempEmail}) for instructions to reset your password.\n\nIf you don't see the email, please check your spam folder.`);
+          // Don't set reset token - user will use the link from email
+          // If they need to manually enter token (for testing), they can use the resetUrl if provided
+          if (result.resetUrl) {
+            // For testing: extract token from URL if needed
+            const tokenMatch = result.resetUrl.match(/token=([^&]+)/);
+            if (tokenMatch) {
+              setResetToken(decodeURIComponent(tokenMatch[1]));
+            }
+          }
+          // Don't automatically go to reset-password step - user should use email link
+          // setAuthStep('reset-password');
         } else {
-          alert(result.error || 'Failed to generate reset token');
+          alert(result.error || 'Failed to send password reset email');
         }
       } else {
-        throw new Error('Failed to generate reset token');
+        const errorData = await response.json().catch(() => ({ error: 'Failed to send password reset email' }));
+        throw new Error(errorData.error || 'Failed to send password reset email');
       }
     } catch (error) {
       console.error('Error generating reset token:', error);
@@ -4006,7 +4249,7 @@ const DockRentalPlatform = () => {
   const handleResetPassword = async (e) => {
     e.preventDefault();
     
-    if (!resetToken || !newPassword || !confirmNewPassword) {
+    if (!tempEmail || !tempPassword || !newPassword || !confirmNewPassword) {
       alert('Please fill in all fields.');
       return;
     }
@@ -4022,43 +4265,83 @@ const DockRentalPlatform = () => {
     }
     
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/password-reset`, {
+      const response = await fetch(`${API_BASE_URL}/api/password-reset`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           action: 'reset-password',
-          resetToken: resetToken,
-          newPassword: newPassword
+          email: tempEmail,
+          tempPassword: tempPassword,
+          newPassword: newPassword,
+          confirmPassword: confirmNewPassword
         }),
       });
       
       if (response.ok) {
         const result = await response.json();
         if (result.success) {
-          alert('✅ Password reset successfully! You can now login with your new password.');
-          setAuthStep('login');
-          setResetToken('');
+          // Password reset successful - now log in with new password
+          const { data: authData, error: loginError } = await supabase.auth.signInWithPassword({
+            email: tempEmail,
+            password: newPassword
+          });
+          
+          if (loginError) {
+            console.error('Error logging in after password reset:', loginError);
+            alert('✅ Password reset successfully! Please log in with your new password.');
+            setAuthStep('login');
+            setLoginData({ email: tempEmail, password: '' });
+          } else {
+            // Successfully logged in
+            const userProfile = await ensureUserProfile(authData.user);
+            if (userProfile) {
+              setCurrentUser(userProfile);
+              if (userProfile.user_type === 'admin' || userProfile.user_type === 'superadmin') {
+                setAdminMode(true);
+                if (userProfile.user_type === 'superadmin') {
+                  setSuperAdminMode(true);
+                }
+              }
+            }
+            setShowLoginModal(false);
+            setAuthStep('login');
+            alert('✅ Password reset successfully! You have been logged in.');
+          }
+          
+          // Clear form and clean URL
+          setTempEmail('');
+          setTempPassword('');
           setNewPassword('');
           setConfirmNewPassword('');
-          setTempEmail('');
+          
+          // Clean temp-password from URL now that reset is complete
+          if (window.location.search.includes('temp-password=true')) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+          }
         } else {
           alert(result.error || 'Failed to reset password');
         }
       } else {
-        throw new Error('Failed to reset password');
+        const errorData = await response.json().catch(() => ({ error: 'Failed to reset password' }));
+        throw new Error(errorData.error || 'Failed to reset password');
       }
     } catch (error) {
       console.error('Error resetting password:', error);
-      alert('❌ Failed to reset password. Please try again.');
+      alert(`❌ Failed to reset password: ${error.message || 'Please try again.'}`);
     }
   };
 
 
 
   const resetAuthFlow = () => {
-    setAuthStep('login');
+    // Don't reset authStep if we're in temp-password mode
+    const urlParams = new URLSearchParams(window.location.search);
+    const isTempPasswordMode = urlParams.get('temp-password') === 'true';
+    if (!isTempPasswordMode && authStep !== 'reset-password') {
+      setAuthStep('login');
+    }
     setTempEmail('');
     setLoginData({ email: '', password: '' });
     setRegisterData({ 
@@ -7305,7 +7588,16 @@ const DockRentalPlatform = () => {
                       </div>
                       <div className="ml-4">
                         <p className="text-sm font-medium text-gray-500">Registered Renters</p>
-                        <p className="text-lg font-semibold text-gray-900">{Array.from(new Set(bookings.map(b => b.guestEmail))).length}</p>
+                        <p className="text-lg font-semibold text-gray-900">
+                          {(() => {
+                            // Count renters from users table (same logic as Registered Renters section)
+                            const rentersFromUsers = allUsers.filter(u => {
+                              const userType = normalizeUserType(u.user_type || u.userType || u.user_role);
+                              return userType === 'renter';
+                            });
+                            return rentersFromUsers.length;
+                          })()}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -7352,12 +7644,15 @@ const DockRentalPlatform = () => {
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold">
-                {authStep === 'login' ? 'Sign In' : 
-                 authStep === 'register' ? 'Create Account' : 
-                 authStep === 'verify-contact' ? 'Review Information' : 
-                 authStep === 'forgot-password' ? 'Reset Password' :
-                 authStep === 'reset-password' ? 'Set New Password' :
-                 'Authentication'}
+                {(() => {
+                  console.log('AUTH DEBUG - Rendering login modal, authStep:', authStep, 'showLoginModal:', showLoginModal);
+                  return authStep === 'login' ? 'Sign In' : 
+                         authStep === 'register' ? 'Create Account' : 
+                         authStep === 'verify-contact' ? 'Review Information' : 
+                         authStep === 'forgot-password' ? 'Reset Password' :
+                         authStep === 'reset-password' ? 'Set New Password' :
+                         'Authentication';
+                })()}
               </h2>
               <button
                 onClick={() => {
@@ -7465,28 +7760,28 @@ const DockRentalPlatform = () => {
             {authStep === 'reset-password' && (
               <form onSubmit={handleResetPassword} className="space-y-4">
                 <div className="text-center mb-4">
-                  <p className="text-gray-600">Enter your new password</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthStep('forgot-password');
-                      setResetToken('');
-                      setNewPassword('');
-                      setConfirmNewPassword('');
-                    }}
-                    className="text-sm text-blue-600 hover:text-blue-700"
-                  >
-                    Back to forgot password
-                  </button>
+                  <p className="text-gray-600">Reset Your Password</p>
+                  <p className="text-sm text-gray-500 mt-2">Enter your email, temporary password from the email, and your new password.</p>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Reset Token</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
                   <input
-                    type="text"
-                    value={resetToken}
-                    onChange={(e) => setResetToken(e.target.value)}
+                    type="email"
+                    value={tempEmail}
+                    onChange={(e) => setTempEmail(e.target.value)}
                     className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    placeholder="Enter the reset token from your email"
+                    placeholder="your@email.com"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Temporary Password</label>
+                  <input
+                    type="password"
+                    value={tempPassword}
+                    onChange={(e) => setTempPassword(e.target.value)}
+                    className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Enter temporary password from email"
                     required
                   />
                 </div>
@@ -7497,8 +7792,9 @@ const DockRentalPlatform = () => {
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    placeholder="Enter new password"
+                    placeholder="Enter new password (min. 6 characters)"
                     required
+                    minLength={6}
                   />
                 </div>
                 <div>
@@ -7510,6 +7806,7 @@ const DockRentalPlatform = () => {
                     className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     placeholder="Confirm new password"
                     required
+                    minLength={6}
                   />
                 </div>
                 <button

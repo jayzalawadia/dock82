@@ -64,36 +64,112 @@
         </div>
         
         <div id="error" class="error" style="display: none;">
-            <h2>❌ Verification Failed</h2>
+            <h2>❌ Link Expired or Invalid</h2>
             <p id="error-message">There was an error verifying your email. Please try again or contact support.</p>
-            <a href="/" class="btn">Go to Dock82</a>
+            <div style="margin-top: 1.5rem;">
+                <a href="/?forgot=true" class="btn" style="margin-right: 0.5rem;">Request New Password Reset</a>
+                <a href="/" class="btn" style="background: #6b7280;">Go to Dock82</a>
+            </div>
         </div>
     </div>
 
     <script>
-        // Handle the auth callback
-        const urlParams = new URLSearchParams(window.location.search);
-        const error = urlParams.get('error');
-        const errorDescription = urlParams.get('error_description');
-        
-        if (error) {
-            document.getElementById('loading').style.display = 'none';
-            document.getElementById('error').style.display = 'block';
-            if (errorDescription) {
-                document.getElementById('error-message').textContent = errorDescription;
+        // Handle the auth callback - check IMMEDIATELY before any other scripts run
+        (function() {
+            'use strict';
+            
+            const urlParams = new URLSearchParams(window.location.search);
+            const hash = window.location.hash;
+            
+            // FIRST: Check if hash contains expired recovery link - redirect immediately
+            if (hash && hash.length > 1) {
+                const hashStr = hash.toLowerCase();
+                // Check for expired recovery link patterns
+                if ((hashStr.includes('error=access_denied') || hashStr.includes('error_code=otp_expired')) && 
+                    (hashStr.includes('type=recovery') || hashStr.includes('recovery'))) {
+                    console.log('Expired recovery link detected in hash, redirecting immediately');
+                    window.location.replace('/?forgot=true&expired=true');
+                    return; // Stop execution
+                }
             }
-        } else {
-            // Success case - redirect back to main app
-            setTimeout(() => {
+            
+            // Check both query params and hash for errors
+            let error = urlParams.get('error');
+            let errorCode = urlParams.get('error_code');
+            let errorDescription = urlParams.get('error_description');
+            
+            // Also check hash fragment for errors (Supabase puts errors in hash)
+            if (hash && hash.length > 1) {
+                try {
+                    const hashParams = new URLSearchParams(hash.substring(1));
+                    if (!error) error = hashParams.get('error');
+                    if (!errorCode) errorCode = hashParams.get('error_code');
+                    if (!errorDescription) errorDescription = hashParams.get('error_description');
+                } catch (e) {
+                    console.error('Error parsing hash:', e);
+                }
+            }
+            
+            // Check URL hash for recovery type (Supabase puts type in hash fragment)
+            // Format: #access_token=...&type=recovery&expires_in=...&refresh_token=...
+            let isPasswordReset = false;
+            
+            if (hash && hash.length > 1) {
+                try {
+                    // Parse hash fragment
+                    const hashParams = new URLSearchParams(hash.substring(1));
+                    const hashType = hashParams.get('type');
+                    isPasswordReset = hashType === 'recovery';
+                    console.log('Hash type detected:', hashType, 'isPasswordReset:', isPasswordReset);
+                } catch (e) {
+                    console.error('Error parsing hash:', e);
+                }
+            }
+            
+            // Also check query params for type
+            const queryType = urlParams.get('type');
+            if (queryType === 'recovery') {
+                isPasswordReset = true;
+            }
+            
+            // Check if this is an expired password reset link
+            const isExpiredRecovery = (errorCode === 'otp_expired' || error === 'access_denied') && 
+                                     (isPasswordReset || hash.includes('type=recovery') || hash.includes('error_code=otp_expired'));
+            
+            if (isExpiredRecovery) {
+                // Expired password reset link - redirect immediately to forgot password form
+                console.log('Expired password reset link detected, redirecting to forgot password form');
+                window.location.replace('/?forgot=true&expired=true');
+            } else if (error) {
                 document.getElementById('loading').style.display = 'none';
-                document.getElementById('success').style.display = 'block';
-                
-                // Redirect after 3 seconds
+                document.getElementById('error').style.display = 'block';
+                let errorMsg = 'There was an error.';
+                if (errorCode === 'otp_expired') {
+                    errorMsg = 'The password reset link has expired. Please request a new password reset link.';
+                } else if (errorDescription) {
+                    errorMsg = decodeURIComponent(errorDescription.replace(/\+/g, ' '));
+                } else if (error) {
+                    errorMsg = 'Authentication error: ' + error;
+                }
+                document.getElementById('error-message').textContent = errorMsg;
+            } else if (isPasswordReset) {
+                // Password reset - redirect IMMEDIATELY to prevent Supabase from auto-logging in
+                // Preserve the hash fragment so Supabase can process it on the main page
+                console.log('Password reset detected, redirecting with hash:', hash);
+                window.location.replace('/?reset=true' + (hash || ''));
+            } else {
+                // Email verification success - redirect back to main app
                 setTimeout(() => {
-                    window.location.href = '/';
-                }, 3000);
-            }, 2000);
-        }
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('success').style.display = 'block';
+                    
+                    // Redirect after 3 seconds
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 3000);
+                }, 2000);
+            }
+        })();
     </script>
 </body>
 </html>
