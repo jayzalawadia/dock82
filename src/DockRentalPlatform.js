@@ -37,7 +37,6 @@ const defaultAdminPermissions = {
 const buildDefaultAdminForm = () => ({
   name: '',
   email: '',
-  password: '',
   phone: '',
   userType: 'admin',
   permissions: { ...defaultAdminPermissions }
@@ -3872,7 +3871,6 @@ const DockRentalPlatform = () => {
     const errors = {};
     const nameValue = (newAdminData.name || '').trim();
     const emailValue = (newAdminData.email || '').trim();
-    const passwordValue = newAdminData.password || '';
     const userTypeValue = normalizeUserType(newAdminData.userType || 'admin');
 
     if (!nameValue) {
@@ -3885,9 +3883,6 @@ const DockRentalPlatform = () => {
       if (!emailRegex.test(emailValue)) {
         errors.email = 'Please enter a valid email address';
       }
-    }
-    if (!passwordValue.trim()) {
-      errors.password = 'Temporary password is required';
     }
     if (!userTypeValue) {
       errors.userType = 'Role is required';
@@ -3903,10 +3898,10 @@ const DockRentalPlatform = () => {
 
     const payload = {
       email: emailValue.toLowerCase(),
-      password: passwordValue,
       name: nameValue,
       phone: (newAdminData.phone || '').trim(),
-      userType: userTypeValue
+      userType: userTypeValue,
+      autoGeneratePassword: true // Flag to tell backend to auto-generate temp password
     };
 
     try {
@@ -3942,7 +3937,7 @@ const DockRentalPlatform = () => {
       await loadAllAdmins();
       await loadAllUsers();
       resetNewAdminForm();
-      alert('✅ Admin created successfully!');
+      alert('✅ Admin created successfully!\n\n📧 A temporary password has been sent to their email address. They will be prompted to change it on first login.');
     } catch (error) {
       console.error('Error creating admin:', error);
       setNewAdminErrors((prev) => ({
@@ -7007,24 +7002,6 @@ const DockRentalPlatform = () => {
                             />
                           </div>
 
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Temporary Password</label>
-                            <input
-                              type="text"
-                              value={newAdminData.password}
-                              onChange={(e) => handleNewAdminInput('password', e.target.value)}
-                              className={`w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent ${
-                                newAdminErrors.password ? 'border-red-500' : 'border-gray-300'
-                              }`}
-                              placeholder="Enter a temporary password"
-                            />
-                            <p className="text-xs text-gray-500 mt-1">
-                              Share this password with the admin. They can change it after logging in.
-                            </p>
-                            {newAdminErrors.password && (
-                              <p className="text-xs text-red-600 mt-1">{newAdminErrors.password}</p>
-                            )}
-                          </div>
 
                           <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>

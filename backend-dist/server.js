@@ -557,15 +557,65 @@ app.post('/api/register-user', async (req, res) => {
       propertyAddress,
       parcelNumber,
       lotNumber,
-      emergencyContact
+      emergencyContact,
+      autoGeneratePassword
     } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
     
     // Normalize userType to lowercase (database constraint requires lowercase)
     const normalizedUserType = userType ? userType.toLowerCase() : 'renter';
+    
+    // For admin/superadmin creation, auto-generate temp password if flag is set
+    let finalPassword = password;
+    let shouldStoreTempPassword = false;
+    
+    if (autoGeneratePassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
+      // Generate temporary password (8-12 characters, alphanumeric + special chars)
+      const generateTempPassword = () => {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+        let tempPassword = '';
+        // Ensure at least one uppercase, one lowercase, one number, one special char
+        tempPassword += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[Math.floor(Math.random() * 26)];
+        tempPassword += 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)];
+        tempPassword += '0123456789'[Math.floor(Math.random() * 10)];
+        tempPassword += '!@#$%^&*'[Math.floor(Math.random() * 8)];
+        // Add 4-8 more random characters
+        for (let i = 0; i < 4 + Math.floor(Math.random() * 5); i++) {
+          tempPassword += chars[Math.floor(Math.random() * chars.length)];
+        }
+        // Shuffle the password
+        return tempPassword.split('').sort(() => Math.random() - 0.5).join('');
+      };
+      
+      finalPassword = generateTempPassword();
+      shouldStoreTempPassword = true;
+    }
+    
+    // Validate: email is always required, password is required unless auto-generating for admin
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    
+    if (!finalPassword) {
+      if (autoGeneratePassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
+        // This shouldn't happen, but just in case, generate one now
+        const generateTempPassword = () => {
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+          let tempPassword = '';
+          tempPassword += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[Math.floor(Math.random() * 26)];
+          tempPassword += 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)];
+          tempPassword += '0123456789'[Math.floor(Math.random() * 10)];
+          tempPassword += '!@#$%^&*'[Math.floor(Math.random() * 8)];
+          for (let i = 0; i < 4 + Math.floor(Math.random() * 5); i++) {
+            tempPassword += chars[Math.floor(Math.random() * chars.length)];
+          }
+          return tempPassword.split('').sort(() => Math.random() - 0.5).join('');
+        };
+        finalPassword = generateTempPassword();
+        shouldStoreTempPassword = true;
+      } else {
+        return res.status(400).json({ error: 'Password is required' });
+      }
+    }
     
     if (normalizedUserType === 'homeowner') {
       if (!propertyAddress || !lotNumber) {
@@ -650,7 +700,7 @@ app.post('/api/register-user', async (req, res) => {
     // Auto-confirm email so user can sign in immediately (we still send verification email via Resend)
     const { data: userData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email: email,
-      password: password,
+      password: finalPassword,
       email_confirm: true, // Auto-confirm email so user can sign in immediately
       user_metadata: {
         name: name || '',
@@ -890,21 +940,103 @@ app.post('/api/register-user', async (req, res) => {
           tokenError = err;
         }
         
-        // Send welcome email via Resend
-        let emailSent = false;
-        let emailErrorDetails = null;
-        try {
-        const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
-            name: name || email.split('@')[0],
-            userType: normalizedUserType || 'renter'
-          });
-          emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
-        } catch (emailErr) {
-          console.error('❌ Error sending welcome email to existing user:', emailErr);
-          emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+        // If this is an admin creation with auto-generated password, update password in Auth and store temp password
+        if (shouldStoreTempPassword && finalPassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
+          try {
+            // Get user from Supabase Auth
+            const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers();
+            const authUser = authUsers.users.find(u => u.email?.toLowerCase() === email.toLowerCase());
+            
+            if (authUser) {
+              // Update password in Supabase Auth to temp password
+              const { error: passwordUpdateError } = await supabaseAdmin.auth.admin.updateUserById(
+                authUser.id,
+                { password: finalPassword }
+              );
+              
+              if (passwordUpdateError) {
+                console.error('Error updating password in Supabase Auth for existing user:', passwordUpdateError);
+              } else {
+                console.log('✅ Password updated in Supabase Auth for existing admin');
+              }
+            }
+            
+            // Store temp password in users table
+            const expiresAt = new Date(Date.now() + 7 * 24 * 3600000); // 7 days from now
+            const { error: tempPasswordError } = await supabaseAdmin
+              .from('users')
+              .update({
+                reset_token: finalPassword,
+                reset_token_expires: expiresAt.toISOString()
+              })
+              .eq('email', email);
+            
+            if (tempPasswordError) {
+              console.error('Error storing temp password for existing user:', tempPasswordError);
+            } else {
+              console.log('✅ Temporary password stored for existing admin');
+            }
+          } catch (tempErr) {
+            console.error('Exception updating password/temp password for existing user:', tempErr);
+          }
         }
         
-        // Return success - user exists in Auth, verification email sent
+        // Send email - temp password for admin creation, welcome email otherwise
+        let emailSent = false;
+        let emailErrorDetails = null;
+        
+        // For admins with auto-generated temp password, send admin welcome email
+        if (shouldStoreTempPassword && finalPassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
+          try {
+            const userName = name || email.split('@')[0];
+            const loginUrl = `${req.headers.origin || 'http://localhost:3000'}/?temp-password=true`;
+            const emailSubject = `Welcome to Dock82 - Your ${normalizedUserType === 'superadmin' ? 'Superadmin' : 'Admin'} Account`;
+            const emailContent = generateAdminWelcomeEmail({
+              name: userName,
+              email: email,
+              tempPassword: finalPassword,
+              loginUrl: loginUrl,
+              userType: normalizedUserType
+            });
+            
+            if (process.env.RESEND_API_KEY) {
+              const { data: emailData, error: emailError } = await resend.emails.send({
+                from: DEFAULT_EMAIL_FROM,
+                to: email,
+                subject: emailSubject,
+                html: emailContent,
+              });
+              
+              if (emailError) {
+                console.error('Resend error sending admin temp password email:', emailError);
+                emailErrorDetails = emailError.message;
+              } else {
+                console.log('✅ Admin temp password email sent via Resend:', emailData?.id);
+                emailSent = true;
+              }
+            } else {
+              console.log('⚠️ Resend API key not configured - admin temp password email not sent');
+              console.log('Temp password for admin:', finalPassword);
+            }
+          } catch (emailErr) {
+            console.error('❌ Error sending admin temp password email:', emailErr);
+            emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+          }
+        } else {
+          // Regular welcome email for non-admin users
+          try {
+            const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
+              name: name || email.split('@')[0],
+              userType: normalizedUserType || 'renter'
+            });
+            emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
+          } catch (emailErr) {
+            console.error('❌ Error sending welcome email to existing user:', emailErr);
+            emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+          }
+        }
+        
+        // Return success - user exists in Auth, email sent
       return res.json({ 
         success: true, 
           user: {
@@ -913,8 +1045,8 @@ app.post('/api/register-user', async (req, res) => {
           },
           verificationUrl: verificationUrl,
           message: emailSent 
-            ? 'User already exists. Welcome email sent via Resend.'
-            : 'User already exists. Welcome email could not be sent.',
+            ? (shouldStoreTempPassword ? 'User already exists. Temporary password email sent via Resend.' : 'User already exists. Welcome email sent via Resend.')
+            : 'User already exists. Email could not be sent.',
           existingUser: true,
           emailSent: emailSent,
           emailError: emailErrorDetails
@@ -1032,6 +1164,28 @@ app.post('/api/register-user', async (req, res) => {
         console.log('✅ User profile created/updated in database:', profileResult);
       }
       
+      // Store temp password if this is an admin with auto-generated password
+      if (shouldStoreTempPassword && finalPassword) {
+        const expiresAt = new Date(Date.now() + 7 * 24 * 3600000); // 7 days from now
+        try {
+          const { error: tempPasswordError } = await supabaseAdmin
+            .from('users')
+            .update({
+              reset_token: finalPassword,
+              reset_token_expires: expiresAt.toISOString()
+            })
+            .eq('email', email);
+          
+          if (tempPasswordError) {
+            console.error('Error storing temp password:', tempPasswordError);
+          } else {
+            console.log('✅ Temporary password stored for admin');
+          }
+        } catch (tempErr) {
+          console.error('Exception storing temp password:', tempErr);
+        }
+      }
+      
       // Always fetch the user profile after creation/update to ensure it's correct
       let finalUserProfile = profileResult;
       if (!finalUserProfile || profileError) {
@@ -1097,16 +1251,56 @@ app.post('/api/register-user', async (req, res) => {
       // Send welcome email via Resend
       let emailSent = false;
       let emailErrorDetails = null;
-      try {
-        const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
-          name: name || email.split('@')[0],
-          userType: normalizedUserType || 'renter'
-        });
-        emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
-      } catch (emailErr) {
-        console.error('❌ Error sending welcome email:', emailErr);
-        emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
-        // Continue anyway - user can verify later
+      
+      // For admins with auto-generated temp password, send temp password email
+      if (shouldStoreTempPassword && finalPassword && (normalizedUserType === 'admin' || normalizedUserType === 'superadmin')) {
+        try {
+          const userName = name || email.split('@')[0];
+          const loginUrl = `${req.headers.origin || 'http://localhost:3000'}/?temp-password=true`;
+          const emailSubject = 'Your Admin Account - Dock82';
+          const emailContent = generatePasswordResetEmail({
+            name: userName,
+            email: email,
+            tempPassword: finalPassword,
+            loginUrl: loginUrl
+          });
+          
+          if (process.env.RESEND_API_KEY) {
+            const { data: emailData, error: emailError } = await resend.emails.send({
+              from: DEFAULT_EMAIL_FROM,
+              to: email,
+              subject: emailSubject,
+              html: emailContent,
+            });
+            
+            if (emailError) {
+              console.error('Resend error sending admin temp password email:', emailError);
+              emailErrorDetails = emailError.message;
+            } else {
+              console.log('✅ Admin temp password email sent via Resend:', emailData?.id);
+              emailSent = true;
+            }
+          } else {
+            console.log('⚠️ Resend API key not configured - admin temp password email not sent');
+            console.log('Temp password for admin:', finalPassword);
+          }
+        } catch (emailErr) {
+          console.error('❌ Error sending admin temp password email:', emailErr);
+          emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+        }
+      } else {
+        // Regular welcome email for non-admin users
+        try {
+          const welcomeResult = await sendEmailNotificationInternal('welcome', email, {
+            name: name || email.split('@')[0],
+            userType: normalizedUserType || 'renter'
+          });
+          emailSent = !!(welcomeResult?.success && !welcomeResult?.logged);
+        } catch (emailErr) {
+          console.error('❌ Error sending welcome email:', emailErr);
+          emailErrorDetails = emailErr?.details || emailErr?.message || emailErr;
+          // Continue anyway - user can verify later
+        }
       }
       
       // Final verification: ensure user exists in database with correct user_type
@@ -1920,6 +2114,81 @@ function generatePasswordResetEmail(data) {
             <li>If you didn't request a password reset, please contact support immediately</li>
           </ul>
         </div>
+        
+        <p>Best regards,<br>The Dock82 Team</p>
+      </div>
+      <div class="footer">
+        <p>Dock82 - Premium Dock Slip Rentals</p>
+        <p>support@dock82.com | www.dock82.com</p>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+function generateAdminWelcomeEmail(data) {
+  const { name, email, tempPassword, loginUrl, userType = 'admin' } = data;
+  const isSuperadmin = userType === 'superadmin';
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+        .header { background: linear-gradient(135deg, #1e3a8a, #3b82f6); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #f8fafc; padding: 30px; border-radius: 0 0 10px 10px; }
+        .button { display: inline-block; padding: 14px 28px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: bold; }
+        .info { background: #dbeafe; border-left: 4px solid #2563eb; padding: 15px; margin: 20px 0; border-radius: 4px; }
+        .footer { text-align: center; margin-top: 30px; color: #6b7280; font-size: 14px; }
+        .password-box { background: #fff; border: 2px solid #2563eb; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0; font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #1e3a8a; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>👑 Welcome to Dock82!</h1>
+        <h2>Your ${isSuperadmin ? 'Superadmin' : 'Admin'} Account</h2>
+      </div>
+      <div class="content">
+        <p>Hello ${name || 'Admin'},</p>
+        
+        <p>Welcome to Dock82! Your ${isSuperadmin ? 'superadmin' : 'admin'} account has been successfully created.</p>
+        
+        <div class="info">
+          <p><strong>📧 Your Account Email:</strong> ${email}</p>
+          <p><strong>🔑 Your Role:</strong> ${isSuperadmin ? 'Superadmin' : 'Admin'}</p>
+        </div>
+        
+        <p>To get started, please log in using the temporary password below. You will be prompted to set a new password on your first login.</p>
+        
+        <div class="password-box">
+          ${tempPassword}
+        </div>
+        
+        <p style="text-align: center;">
+          <a href="${loginUrl}" class="button">Go to Login Page</a>
+        </p>
+        
+        <p><strong>Login Instructions:</strong></p>
+        <ol style="margin: 10px 0; padding-left: 20px;">
+          <li>Click the button above or visit: <a href="${loginUrl}">${loginUrl}</a></li>
+          <li>Enter your email address: <strong>${email}</strong></li>
+          <li>Enter the temporary password shown above</li>
+          <li>You will be prompted to set a new password</li>
+          <li>Once complete, you'll have full access to the admin panel</li>
+        </ol>
+        
+        <div class="info">
+          <strong>ℹ️ Important:</strong>
+          <ul style="margin: 10px 0; padding-left: 20px;">
+            <li>This temporary password will expire in 7 days</li>
+            <li>You must set a new password on your first login</li>
+            <li>Keep your password secure and do not share it with anyone</li>
+          </ul>
+        </div>
+        
+        <p>If you have any questions or need assistance, please contact the Dock82 support team.</p>
         
         <p>Best regards,<br>The Dock82 Team</p>
       </div>
