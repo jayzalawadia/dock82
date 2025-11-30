@@ -2450,22 +2450,33 @@ const DockRentalPlatform = () => {
       setShowPaymentPage(false);
       setCurrentView('browse');
       
-      // Send confirmation emails
-      await sendEmailNotification('bookingPending', bookingData.guestEmail, {
-        guestName: bookingData.guestName,
-        slipName: selectedSlip.name,
-        checkIn: bookingData.checkIn,
-        checkOut: bookingData.checkOut,
-        boatMakeModel: bookingData.boatMakeModel,
-        boatLength: bookingData.boatLength,
-        totalAmount: finalTotal
-      });
-
-      // Show different message based on payment exemption status
+      // Send appropriate email based on payment exemption status
       if (isPaymentExempt(bookingData.userType)) {
+        // For exempt users, send confirmation email (booking is already confirmed)
+        await sendEmailNotification('bookingConfirmation', bookingData.guestEmail, {
+          guestName: bookingData.guestName,
+          slipName: selectedSlip.name,
+          checkIn: bookingData.checkIn,
+          checkOut: bookingData.checkOut,
+          boatMakeModel: bookingData.boatMakeModel,
+          boatLength: bookingData.boatLength,
+          totalAmount: finalTotal
+        });
+        
         const userTypeLabel = formatUserTypeLabel(bookingData.userType);
         alert(`✅ Booking confirmed! Your ${userTypeLabel.toLowerCase()} booking has been automatically confirmed. No payment required.`);
       } else {
+        // For renters, send pending email (booking needs approval)
+        await sendEmailNotification('bookingPending', bookingData.guestEmail, {
+          guestName: bookingData.guestName,
+          slipName: selectedSlip.name,
+          checkIn: bookingData.checkIn,
+          checkOut: bookingData.checkOut,
+          boatMakeModel: bookingData.boatMakeModel,
+          boatLength: bookingData.boatLength,
+          totalAmount: finalTotal
+        });
+        
         alert('Payment authorization successful! Your booking request has been submitted for approval. Your card will be charged only after Dock82 confirms the reservation.');
       }
     } catch (error) {
