@@ -3406,8 +3406,14 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
       .eq('id', booking.slip_id)
       .single();
 
+    // Check if booking is payment-exempt (homeowner, admin, superadmin, or payment_method is 'exempt')
+    const userType = (booking.user_type || '').toLowerCase();
+    const paymentMethod = (booking.payment_method || '').toLowerCase();
+    const isPaymentExempt = userType === 'homeowner' || userType === 'admin' || userType === 'superadmin' || paymentMethod === 'exempt';
+
     let captureResult = null;
-    if (booking.payment_reference) {
+    // Only process Stripe payment if booking is not exempt and has a payment reference
+    if (!isPaymentExempt && booking.payment_reference) {
       try {
         const paymentIntent = await stripe.paymentIntents.retrieve(booking.payment_reference);
         if (paymentIntent.status === 'requires_capture' || paymentIntent.status === 'processing') {
@@ -3422,12 +3428,14 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
         console.error('❌ Stripe capture error:', stripeError);
         return res.status(500).json({ error: 'Failed to capture payment', details: stripeError.message });
       }
+    } else if (isPaymentExempt) {
+      console.log('ℹ️ Booking is payment-exempt. Skipping payment capture.');
     }
 
     const updatePayload = {
       status: 'confirmed',
-      payment_status: booking.payment_reference ? 'paid' : (booking.payment_status || 'paid'),
-      payment_date: booking.payment_reference ? new Date().toISOString() : booking.payment_date,
+      payment_status: isPaymentExempt ? (booking.payment_status || 'paid') : (booking.payment_reference ? 'paid' : (booking.payment_status || 'paid')),
+      payment_date: isPaymentExempt ? (booking.payment_date || new Date().toISOString()) : (booking.payment_reference ? new Date().toISOString() : booking.payment_date),
       updated_at: new Date().toISOString()
     };
 
@@ -3463,7 +3471,8 @@ app.post('/api/bookings/:id/approve', async (req, res) => {
       };
 
       try {
-        if (captureResult || updatePayload.payment_status === 'paid') {
+        // Only send payment receipt if payment was actually processed (not exempt)
+        if (!isPaymentExempt && (captureResult || updatePayload.payment_status === 'paid')) {
           await sendEmailNotificationInternal('paymentReceipt', booking.guest_email, {
             guestName: booking.guest_name,
             slipName: emailPayload.slipName,
@@ -3525,10 +3534,16 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
       : null;
     const withinNonRefundableWindow = typeof daysUntilCheckIn === 'number' && daysUntilCheckIn < 7;
 
+    // Check if booking is payment-exempt (homeowner, admin, superadmin, or payment_method is 'exempt')
+    const userType = (booking.user_type || '').toLowerCase();
+    const paymentMethod = (booking.payment_method || '').toLowerCase();
+    const isPaymentExempt = userType === 'homeowner' || userType === 'admin' || userType === 'superadmin' || paymentMethod === 'exempt';
+
     let refundResult = null;
     let paymentStatusUpdate = booking.payment_status;
 
-    if (booking.payment_reference) {
+    // Only process Stripe payment if booking is not exempt and has a payment reference
+    if (!isPaymentExempt && booking.payment_reference) {
       try {
         const paymentIntent = await stripe.paymentIntents.retrieve(booking.payment_reference);
 
@@ -3554,6 +3569,10 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
         console.error('❌ Stripe refund/void error:', refundError);
         return res.status(500).json({ error: 'Failed to adjust payment authorization', details: refundError.message });
       }
+    } else if (isPaymentExempt) {
+      // For exempt bookings, no refund needed - just mark as cancelled
+      console.log('ℹ️ Booking is payment-exempt. No payment adjustment needed.');
+      paymentStatusUpdate = booking.payment_status || 'exempt';
     }
 
     const updatePayload = {
