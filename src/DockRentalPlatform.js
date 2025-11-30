@@ -312,6 +312,12 @@ const DockRentalPlatform = () => {
     if (!value) return 'renter';
     return value.toString().toLowerCase();
   }, []);
+  
+  // Helper function to check if user type is exempt from payment
+  const isPaymentExempt = useCallback((userType) => {
+    const normalized = normalizeUserType(userType);
+    return normalized === 'homeowner' || normalized === 'admin' || normalized === 'superadmin';
+  }, [normalizeUserType]);
   const formatUserTypeLabel = useCallback(
     (value) => {
       const normalized = normalizeUserType(value);
@@ -1670,7 +1676,7 @@ const DockRentalPlatform = () => {
     let refundAmount = 0;
     let cancellationFee = 0;
     
-    if (booking.userType === 'homeowner') {
+    if (isPaymentExempt(booking.userType)) {
       refundAmount = 0; // No money was charged
     } else {
       if (daysUntilCheckIn >= 7) {
@@ -1693,7 +1699,7 @@ const DockRentalPlatform = () => {
       cancellationDate: new Date().toISOString().split('T')[0],
       cancellationReason: cancellationReason,
       refundAmount: refundAmount,
-      paymentStatus: booking.userType === 'homeowner' ? 'exempt' : 
+      paymentStatus: isPaymentExempt(booking.userType) ? 'exempt' : 
                      refundAmount === booking.totalCost ? 'refunded' : 
                      refundAmount > 0 ? 'partially_refunded' : 'non_refundable'
     };
@@ -1703,7 +1709,7 @@ const DockRentalPlatform = () => {
     setShowCancellationModal(null);
     setCancellationReason('');
     
-    if (booking.userType === 'homeowner') {
+    if (isPaymentExempt(booking.userType)) {
       alert('Booking cancelled successfully. No charges were applied.');
     } else {
       alert(`Booking cancelled. Refund amount: $${(refundAmount || 0).toFixed(2)}${cancellationFee > 0 ? ` (Cancellation fee: $${(cancellationFee || 0).toFixed(2)})` : ''}`);
@@ -2293,7 +2299,7 @@ const DockRentalPlatform = () => {
       const nights = Math.ceil((new Date(bookingData.checkOut) - new Date(bookingData.checkIn)) / (1000 * 60 * 60 * 24));
       const baseTotal = nights * selectedSlip.price_per_night;
       const discount = nights === 30 ? baseTotal * 0.4 : 0; // 40% discount for 30-day bookings
-      const finalTotal = bookingData.userType === 'homeowner'
+      const finalTotal = isPaymentExempt(bookingData.userType)
         ? 0
         : baseTotal - discount;
 
@@ -2321,7 +2327,7 @@ const DockRentalPlatform = () => {
           }
         }
 
-        if (bookingData.userType === 'homeowner' && authUserId) {
+        if (isPaymentExempt(bookingData.userType) && authUserId) {
           if (bookingData.homeownerInsuranceProof) {
             const uploadResult = await uploadUserDocument(bookingData.homeownerInsuranceProof, authUserId, 'homeowner-insurance');
             if (uploadResult.success) {
@@ -2340,17 +2346,17 @@ const DockRentalPlatform = () => {
         console.error('❌ Error uploading files:', uploadError);
       }
 
-      const rentalAgreementName = bookingData.userType === 'homeowner'
+      const rentalAgreementName = isPaymentExempt(bookingData.userType)
         ? null
         : bookingData.rentalAgreement?.name || null;
-      const finalRentalAgreementPath = bookingData.userType === 'homeowner'
+      const finalRentalAgreementPath = isPaymentExempt(bookingData.userType)
         ? null
         : rentalAgreementPath;
 
-      const insuranceProofName = bookingData.userType === 'homeowner'
+      const insuranceProofName = isPaymentExempt(bookingData.userType)
         ? bookingData.homeownerInsuranceProof?.name || null
         : bookingData.insuranceProof?.name || null;
-      const finalInsuranceProofPath = bookingData.userType === 'homeowner'
+      const finalInsuranceProofPath = isPaymentExempt(bookingData.userType)
         ? homeownerInsurancePath
         : insuranceProofPath;
 
@@ -2372,10 +2378,10 @@ const DockRentalPlatform = () => {
         boat_make_model: bookingData.boatMakeModel,
           nights,
         total_cost: finalTotal,
-          status: bookingData.userType === 'homeowner' ? 'confirmed' : 'pending',
-          payment_status: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
-        payment_date: bookingData.userType === 'homeowner' ? new Date().toISOString() : null,
-          payment_method: bookingData.userType === 'homeowner' ? 'exempt' : 'stripe',
+          status: isPaymentExempt(bookingData.userType) ? 'confirmed' : 'pending',
+          payment_status: isPaymentExempt(bookingData.userType) ? 'paid' : 'pending',
+        payment_date: isPaymentExempt(bookingData.userType) ? new Date().toISOString() : null,
+          payment_method: isPaymentExempt(bookingData.userType) ? 'exempt' : 'stripe',
           payment_reference: paymentResult.paymentIntentId,
           rental_agreement_name: rentalAgreementName,
           rental_agreement_path: finalRentalAgreementPath,
@@ -2410,9 +2416,9 @@ const DockRentalPlatform = () => {
           ...bookingData,
           nights,
           totalCost: finalTotal,
-          status: bookingData.userType === 'homeowner' ? 'confirmed' : 'pending',
-          paymentStatus: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
-          payment_status: bookingData.userType === 'homeowner' ? 'paid' : 'pending',
+          status: isPaymentExempt(bookingData.userType) ? 'confirmed' : 'pending',
+          paymentStatus: isPaymentExempt(bookingData.userType) ? 'paid' : 'pending',
+          payment_status: isPaymentExempt(bookingData.userType) ? 'paid' : 'pending',
           rentalAgreementName: rentalAgreementName,
           rentalAgreementPath: finalRentalAgreementPath,
           insuranceProofName: insuranceProofName,
@@ -2455,7 +2461,13 @@ const DockRentalPlatform = () => {
         totalAmount: finalTotal
       });
 
-      alert('Payment authorization successful! Your booking request has been submitted for approval. Your card will be charged only after Dock82 confirms the reservation.');
+      // Show different message based on payment exemption status
+      if (isPaymentExempt(bookingData.userType)) {
+        const userTypeLabel = formatUserTypeLabel(bookingData.userType);
+        alert(`✅ Booking confirmed! Your ${userTypeLabel.toLowerCase()} booking has been automatically confirmed. No payment required.`);
+      } else {
+        alert('Payment authorization successful! Your booking request has been submitted for approval. Your card will be charged only after Dock82 confirms the reservation.');
+      }
     } catch (error) {
       console.error('Payment completion error:', error);
       alert('Payment processed but there was an error completing the booking. Please contact support.');
@@ -2523,16 +2535,17 @@ const DockRentalPlatform = () => {
     }
 
     const totalInfo = calculateBookingTotal(bookingData.checkIn, bookingData.checkOut, selectedSlip.price_per_night);
-    const totalCost = bookingData.userType === 'homeowner' ? 0 : totalInfo.finalTotal;
+    const totalCost = isPaymentExempt(bookingData.userType) ? 0 : totalInfo.finalTotal;
 
     // For renters, show payment page instead of processing payment directly
+    // Admins and superadmins (like homeowners) skip payment and auto-confirm
     if (bookingData.userType === 'renter') {
       setShowPaymentPage(true);
       return;
     }
 
     await handlePaymentComplete({
-      paymentIntentId: `homeowner-${Date.now()}`,
+      paymentIntentId: `${isPaymentExempt(bookingData.userType) ? normalizeUserType(bookingData.userType) : 'homeowner'}-${Date.now()}`,
       totalAmount: totalCost,
       paymentMethod: 'exempt'
     });
@@ -5409,8 +5422,8 @@ const DockRentalPlatform = () => {
               <div className="bg-gray-50 p-4 rounded-lg">
                 <h3 className="font-semibold mb-2">Booking Type</h3>
                 <p className="text-sm text-gray-600">
-                  {bookingData.userType === 'homeowner'
-                    ? 'Homeowner booking (no nightly charge)'
+                  {isPaymentExempt(bookingData.userType)
+                    ? `${formatUserTypeLabel(bookingData.userType)} booking (no nightly charge)`
                     : 'Renter booking (charged per night)'}
                 </p>
               </div>
@@ -5623,7 +5636,7 @@ const DockRentalPlatform = () => {
                   </div>
                 </div>
               )}
-              {bookingData.userType === 'homeowner' && (
+              {isPaymentExempt(bookingData.userType) && (
                 <div className="bg-red-100 p-4 rounded-lg border-2 border-red-300">
                   <h3 className="text-lg font-semibold text-red-900 mb-3">🚨 Recommended Document</h3>
                   <div>
