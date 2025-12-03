@@ -1236,29 +1236,11 @@ const DockRentalPlatform = () => {
     return conflictingBookings.length === 0;
   };
 
-  // Update slip availability based on bookings
-  useEffect(() => {
-    const updatedSlips = slips.map(slip => {
-      const confirmedBookings = bookings.filter(booking => 
-        booking.slipId === slip.id && 
-        booking.status === 'confirmed'
-      );
-      
-      // Check if slip has any current/future confirmed bookings
-      const hasActiveBookings = confirmedBookings.some(booking => {
-        const checkOutDate = new Date(booking.checkOut);
-        const today = new Date();
-        return checkOutDate >= today;
-      });
-      
-      return {
-        ...slip,
-        available: !hasActiveBookings
-      };
-    });
-    
-    setSlips(updatedSlips);
-  }, [bookings]);
+  // IMPORTANT: Do NOT modify slip availability based on bookings
+  // The 'available' field in the database should ONLY be set manually by admins
+  // Bookings should NOT affect the database available status
+  // Slip management should always show the actual database value from allSlips
+  // Date filtering will handle availability based on bookings separately
 
   // AUTH STATE LISTENER
   // Initialize session restoration on app load
@@ -2590,19 +2572,42 @@ const DockRentalPlatform = () => {
   const isSlipAvailableForDateRange = (slip, startDate, endDate) => {
     if (!startDate || !endDate) return true; // If no date range selected, show all
     
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    // Parse and normalize dates to start/end of day for accurate comparison
+    const parseDate = (dateStr) => {
+      if (!dateStr) return null;
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) return null;
+      // Normalize to local date (ignore time)
+      return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    };
     
-    // Check if slip has any overlapping bookings
+    const start = parseDate(startDate);
+    const end = parseDate(endDate);
+    
+    if (!start || !end) return true; // Invalid dates, show all
+    
+    // Check if slip has any overlapping CONFIRMED bookings (only confirmed bookings block availability)
     const hasOverlap = bookings.some(booking => {
-      if (booking.slipId !== slip.id && booking.slip_id !== slip.id) return false;
-      if (booking.status === 'cancelled') return false;
+      // Check if this booking is for this slip - handle both slipId and slip_id formats
+      const bookingSlipId = booking.slipId || booking.slip_id;
+      if (bookingSlipId !== slip.id) return false;
       
-      const bookingStart = new Date(booking.checkIn || booking.check_in);
-      const bookingEnd = new Date(booking.checkOut || booking.check_out);
+      // Only consider confirmed bookings - pending and cancelled bookings don't block availability
+      if (booking.status !== 'confirmed') return false;
       
-      // Check for overlap: booking overlaps if it starts before our end and ends after our start
-      return bookingStart < end && bookingEnd > start;
+      // Get booking dates, handling both camelCase and snake_case formats
+      const bookingStart = parseDate(booking.checkIn || booking.check_in);
+      const bookingEnd = parseDate(booking.checkOut || booking.check_out);
+      
+      if (!bookingStart || !bookingEnd) return false; // Invalid booking dates, skip
+      
+      // Check for overlap: Two date ranges overlap if:
+      // - bookingStart <= end (booking starts before or on our end date)
+      // AND bookingEnd >= start (booking ends after or on our start date)
+      // This means the booking period intersects with the requested date range
+      const overlaps = bookingStart <= end && bookingEnd >= start;
+      
+      return overlaps;
     });
     
     return !hasOverlap;
@@ -2610,7 +2615,8 @@ const DockRentalPlatform = () => {
 
   const filteredSlips = sortSlips(
     slips.filter((slip) => {
-      if (!slip.available) return false;
+      // Always exclude inactive slips (regardless of other filters)
+      if (!slip.available || slip.available === false) return false;
 
       // Filter by max length
       if (searchFilters.maxLength && parseInt(searchFilters.maxLength) > slip.max_length) {
@@ -2625,9 +2631,9 @@ const DockRentalPlatform = () => {
 
       // Filter by date range availability
       if (searchFilters.dateRangeStart && searchFilters.dateRangeEnd) {
-        if (!isSlipAvailableForDateRange(slip, searchFilters.dateRangeStart, searchFilters.dateRangeEnd)) {
-          return false;
-        }
+        // Check if slip is available for the selected date range
+        const isAvailable = isSlipAvailableForDateRange(slip, searchFilters.dateRangeStart, searchFilters.dateRangeEnd);
+        if (!isAvailable) return false;
       }
 
     return true;
