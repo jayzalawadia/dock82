@@ -2478,6 +2478,57 @@ function generateBookingNotApprovedEmail(data) {
   `;
 }
 
+function generateBookingCancelledEmail(data) {
+  const checkIn = new Date(data.checkIn).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const checkOut = new Date(data.checkOut).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const showRefundMessage = data.showRefundMessage !== false; // Default to true unless explicitly set to false
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #b91c1c; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #fef2f2; padding: 20px; border: 1px solid #fecaca; }
+        .footer { background: #fee2e2; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; }
+        .info-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .info-table td { padding: 10px; border-bottom: 1px solid #fecaca; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>Dock82 Booking Cancelled</h1>
+      </div>
+      <div class="content">
+        <p>Dear ${data.guestName},</p>
+        <p>Your booking for <strong>${data.slipName}</strong> has been cancelled.</p>
+        <table class="info-table">
+          <tr>
+            <td><strong>Slip:</strong></td>
+            <td>${data.slipName}</td>
+          </tr>
+          <tr>
+            <td><strong>Stay Period:</strong></td>
+            <td>${checkIn} to ${checkOut}</td>
+          </tr>
+          <tr>
+            <td><strong>Boat:</strong></td>
+            <td>${data.boatMakeModel || 'N/A'}${data.boatLength ? ` (${data.boatLength} ft)` : ''}</td>
+          </tr>
+        </table>
+        ${showRefundMessage ? '<p>Your payment has been refunded in full. Depending on your bank, the refund should appear on your statement within 5-10 business days.</p>' : ''}
+        ${data.reason ? `<p><strong>Cancellation Reason:</strong> ${data.reason}</p>` : ''}
+        <p>If you have any questions or would like to make a new booking, please contact our support team.</p>
+      </div>
+      <div class="footer">
+        <p>Best regards,<br>The Dock82 Team</p>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
 function generateHomeownerInactiveEmail(data) {
   const homeownerName = data.name || 'Valued Homeowner';
   const propertyAddress = data.propertyAddress || 'your property';
@@ -2750,6 +2801,10 @@ async function sendEmailNotificationInternal(type, email, data) {
       emailSubject = `Booking Update - ${data.slipName} at Dock82`;
       emailContent = generateBookingNotApprovedEmail(data);
       break;
+    case 'bookingCancelled':
+      emailSubject = `Booking Cancelled - ${data.slipName} at Dock82`;
+      emailContent = generateBookingCancelledEmail(data);
+      break;
     case 'permit':
       emailSubject = `Dock Permit - ${data.slipName} at Dock82`;
       emailContent = generatePermitEmail(data);
@@ -2839,7 +2894,13 @@ app.get('/api/slips', async (req, res) => {
 
     if (filterByDate) {
       startDate = new Date(start);
+      if (isNaN(startDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid "start" date format. Expected ISO date string (YYYY-MM-DD)' });
+      }
       endDate = new Date(end);
+      if (isNaN(endDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid "end" date format. Expected ISO date string (YYYY-MM-DD)' });
+      }
 
       if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
         return res.status(400).json({ error: 'Invalid date range provided' });
@@ -3401,7 +3462,7 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
     }
 
     const { id } = req.params;
-    const { reason } = req.body || {};
+    const { reason, isSelfCancellation } = req.body || {};
 
     const { data: booking, error: fetchError } = await supabaseAdmin
       .from('bookings')
@@ -3471,7 +3532,7 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
       status: 'cancelled',
       payment_status: paymentStatusUpdate,
       canceled_at: new Date().toISOString(),
-      cancellation_reason: reason || 'Cancelled by admin',
+      cancellation_reason: reason || (isSelfCancellation ? 'Cancelled by user' : 'Cancelled by admin'),
       payment_date: paymentStatusUpdate === 'paid' ? booking.payment_date : (paymentStatusUpdate === 'refunded' ? new Date().toISOString() : booking.payment_date)
     };
 
@@ -3498,15 +3559,31 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
     if (booking.guest_email) {
       const slipName = slip?.name || booking.slip_name || `Slip ${booking.slip_id?.substring(0, 8)}`;
       try {
-        await sendEmailNotificationInternal('bookingNotApproved', booking.guest_email, {
-          guestName: booking.guest_name,
-          slipName,
-          checkIn: booking.check_in,
-          checkOut: booking.check_out,
-          boatMakeModel: booking.boat_make_model,
-          boatLength: booking.boat_length,
-          reason: reason || 'The dock owner was unable to approve this booking at this time.'
-        });
+        // Use different email template based on who is cancelling
+        if (isSelfCancellation) {
+          // User is cancelling their own booking
+          await sendEmailNotificationInternal('bookingCancelled', booking.guest_email, {
+            guestName: booking.guest_name,
+            slipName,
+            checkIn: booking.check_in,
+            checkOut: booking.check_out,
+            boatMakeModel: booking.boat_make_model,
+            boatLength: booking.boat_length,
+            reason: reason || undefined,
+            showRefundMessage: !isPaymentExempt && (paymentStatusUpdate === 'refunded' || paymentStatusUpdate === 'failed')
+          });
+        } else {
+          // Admin is cancelling the booking
+          await sendEmailNotificationInternal('bookingNotApproved', booking.guest_email, {
+            guestName: booking.guest_name,
+            slipName,
+            checkIn: booking.check_in,
+            checkOut: booking.check_out,
+            boatMakeModel: booking.boat_make_model,
+            boatLength: booking.boat_length,
+            reason: reason || 'The dock owner was unable to approve this booking at this time.'
+          });
+        }
       } catch (emailError) {
         console.error('Error sending cancellation email:', emailError);
       }

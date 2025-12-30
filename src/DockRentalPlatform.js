@@ -2058,13 +2058,24 @@ const DockRentalPlatform = () => {
   };
 
   const handleCancelBooking = async (bookingId) => {
+    // First confirm cancellation
+    if (!window.confirm('Are you sure you want to cancel this booking? This action cannot be undone.')) {
+      return;
+    }
+    
+    // Then ask for optional reason
     const reason = window.prompt('Provide a reason for cancellation (optional):', '');
+    // If user cancels the prompt, reason will be null, which is fine (it's optional)
+    
     try {
       const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5001';
       const response = await fetch(`${apiUrl}/api/bookings/${bookingId}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason || undefined })
+        body: JSON.stringify({ 
+          reason: reason || undefined,
+          isSelfCancellation: true // User is cancelling their own booking
+        })
       });
 
       if (!response.ok) {
@@ -2108,13 +2119,14 @@ const DockRentalPlatform = () => {
       };
 
       setBookings(prev => prev.map(b => b.id === bookingId ? normalizedBooking : b));
+      setAllBookings(prev => prev.map(b => b.id === bookingId ? normalizedBooking : b));
 
       // Mark slip as available again locally
       if (updated?.slip_id) {
         setSlips(prev => prev.map(slipItem => slipItem.id === updated.slip_id ? { ...slipItem, available: true } : slipItem));
       }
 
-      alert('Booking has been cancelled and the renter has been notified.');
+      alert('Booking has been cancelled successfully.');
     } catch (error) {
       console.error('Error cancelling booking:', error);
       alert('Failed to cancel booking. Please try again.');
@@ -5773,6 +5785,16 @@ const DockRentalPlatform = () => {
                               className="block mt-2 text-blue-600 hover:text-blue-700 text-sm font-medium"
                             >
                               📄 Download Permit
+                            </button>
+                          )}
+                          
+                          {/* Cancel Booking Button - Show for non-cancelled bookings */}
+                          {booking.status !== 'cancelled' && (
+                            <button
+                              onClick={() => handleCancelBooking(booking.id)}
+                              className="block mt-2 text-red-600 hover:text-red-700 text-sm font-medium"
+                            >
+                              ✕ Cancel Booking
                             </button>
                           )}
                           
